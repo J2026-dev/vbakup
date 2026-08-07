@@ -20,6 +20,7 @@ curl -fsSL https://raw.githubusercontent.com/J2026-dev/vbakup/main/install.sh | 
 安装向导会自动下载 `https://github.com/J2026-dev/vbakup` 的源码、安装依赖、创建 `/usr/local/bin/vbackup` 命令、配置 systemd timer，并引导你填写 Google Drive、Restic 与 Telegram 配置。
 
 > 一键安装命令通过管道执行脚本，但安装器会从 `/dev/tty` 读取交互输入；看到 `Google Drive Client Secret` 或 `Refresh Token` 时输入不会显示，这是正常的，直接按回车即可跳过可选项。
+> 如果看到 `failed to create oauth client: empty token found`，说明已有的 `gdrive` remote token 无效。请执行 `rclone config reconnect gdrive:` 修复，或重新运行安装器并填写 Google Drive Refresh Token。
 
 ## 中文安装步骤
 

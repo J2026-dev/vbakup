@@ -70,20 +70,53 @@ install_files() {
   ln -sf "$PREFIX/vbackup" /usr/local/bin/vbackup
 }
 
-configure_rclone_google_drive() {
+rclone_remote_exists() {
+  local remote="$1"
+  rclone listremotes 2>/dev/null | sed 's/:$//' | grep -Fxq "$remote"
+}
+
+rclone_remote_works() {
+  local remote="$1"
+  rclone lsd "${remote}:" >/dev/null 2>&1
+}
+
+create_rclone_google_drive_remote() {
   local remote="$1" client_id="$2" client_secret="$3" refresh_token="$4"
-  if rclone listremotes 2>/dev/null | sed 's/:$//' | grep -Fxq "$remote"; then
-    echo "rclone remote '${remote}' already exists; keeping existing configuration."
-    return 0
-  fi
-  if [[ -z "$refresh_token" ]]; then
-    echo "No refresh token provided and rclone remote '${remote}' does not exist."
-    echo "Run 'rclone config' first, or rerun this installer with Google Drive OAuth values."
-    return 1
-  fi
   mkdir -p /root/.config/rclone
   umask 077
+  rclone config delete "$remote" >/dev/null 2>&1 || true
   rclone config create "$remote" drive client_id "$client_id" client_secret "$client_secret" token "{\"access_token\":\"\",\"token_type\":\"Bearer\",\"refresh_token\":\"$refresh_token\",\"expiry\":\"2000-01-01T00:00:00Z\"}" >/dev/null
+}
+
+configure_rclone_google_drive() {
+  local remote="$1" client_id="$2" client_secret="$3" refresh_token="$4"
+  if rclone_remote_exists "$remote"; then
+    echo "rclone remote '${remote}' already exists; validating access..."
+    if rclone_remote_works "$remote"; then
+      echo "rclone remote '${remote}' is valid."
+      return 0
+    fi
+    echo "rclone remote '${remote}' exists but cannot access Google Drive."
+    echo "This usually means its OAuth token is missing or expired."
+    if [[ -n "$refresh_token" ]]; then
+      echo "Recreating rclone remote '${remote}' with the provided refresh token..."
+      create_rclone_google_drive_remote "$remote" "$client_id" "$client_secret" "$refresh_token"
+      rclone_remote_works "$remote" || { echo "rclone remote '${remote}' is still invalid after recreation." >&2; return 1; }
+      return 0
+    fi
+    echo "Fix it with one of these commands, then rerun the installer:" >&2
+    echo "  rclone config reconnect ${remote}:" >&2
+    echo "  rclone config delete ${remote} && rclone config" >&2
+    echo "Or rerun this installer and provide Google Drive Client ID/Secret/Refresh Token." >&2
+    return 1
+  fi
+  if [[ -z "$refresh_token" ]]; then
+    echo "No refresh token provided and rclone remote '${remote}' does not exist." >&2
+    echo "Run 'rclone config' first, or rerun this installer with Google Drive OAuth values." >&2
+    return 1
+  fi
+  create_rclone_google_drive_remote "$remote" "$client_id" "$client_secret" "$refresh_token"
+  rclone_remote_works "$remote" || { echo "rclone remote '${remote}' is invalid after creation." >&2; return 1; }
 }
 
 write_config() {
