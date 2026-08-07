@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["server","docker","systemd","database","webserver","network","backup_time","version","restore_order"],"properties":{"server":{"type":"string"},"backup_time":{"type":"string"},"version":{"type":"string"},"restore_order":{"type":"array","items":{"type":"string"}}}}

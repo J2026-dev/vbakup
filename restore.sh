@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+VBACKUP_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; export VBACKUP_ROOT
+source "$VBACKUP_ROOT/lib/logger.sh"; source "$VBACKUP_ROOT/lib/utils.sh"; source "$VBACKUP_ROOT/lib/restic.sh"; source "$VBACKUP_ROOT/lib/network.sh"; source "$VBACKUP_ROOT/lib/database.sh"; source "$VBACKUP_ROOT/lib/docker.sh"; source "$VBACKUP_ROOT/lib/systemd.sh"; source "$VBACKUP_ROOT/lib/webserver.sh"; source "$VBACKUP_ROOT/lib/notify.sh"; source "$VBACKUP_ROOT/lib/gdrive.sh"
+choose_snapshot() { local snap="${1:-}"; [[ -n "$snap" ]] && { echo "$snap"; return; }; echo "Available Snapshots:" >&2; restic snapshots --compact || true; read -r -p "Snapshot (latest or ID): " snap; echo "${snap:-latest}"; }
+main() { logger_init; load_config; local snapshot target mode; mode="${1:-interactive}"; snapshot="$(choose_snapshot "${2:-}")"; target="${VBACKUP_RESTORE_WORKDIR:-/tmp/vbackup-restore}"; rm -rf "$target"; mkdir -p "$target"; trap 'log_info "Restore workspace: '$target'"' EXIT; [[ "$mode" == "auto" ]] || read -r -p "Restore snapshot $snapshot to this VPS? Type RESTORE: " ok; [[ "${ok:-RESTORE}" == "RESTORE" ]] || exit 1; restic_restore_snapshot "$snapshot" "$target"; local payload; payload="$(dirname "$(find "$target" -name manifest.json -print -quit)")"; network_restore "$payload"; database_restore "$payload"; docker_restore "$payload"; systemd_restore "$payload"; webserver_restore "$payload"; "$VBACKUP_ROOT/verify.sh" || true; notify_telegram RESTORED "$snapshot" n/a n/a; log_success "Restore workflow complete"; }
+main "$@"
