@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily VBackup DR backup timer
+
+[Timer]
+OnCalendar=*-*-* 20:00:00 UTC
+Persistent=true
+Unit=vbackup-backup.service
+
+[Install]
+WantedBy=timers.target
