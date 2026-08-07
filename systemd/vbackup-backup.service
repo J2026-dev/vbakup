@@ -1,0 +1,9 @@
+[Unit]
+Description=VBackup DR backup job
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/vbackup/server.conf
+ExecStart=/opt/vbackup/backup.sh
