@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cmd="${1:-menu}"; shift || true
+case "$cmd" in
+  backup) "$ROOT/backup.sh" "$@";;
+  restore) "$ROOT/restore.sh" "$@";;
+  status) systemctl status vbackup-backup.timer --no-pager || true;;
+  snapshots) source "$ROOT/lib/utils.sh"; load_config; restic snapshots;;
+  test) source "$ROOT/lib/logger.sh"; source "$ROOT/lib/utils.sh"; source "$ROOT/lib/check.sh"; logger_init; load_config; check_environment;;
+  verify) "$ROOT/verify.sh" "$@";;
+  update) "$ROOT/update.sh" "$@";;
+  logs) tail -n 200 /var/log/vbackup/"$(date -u '+%Y-%m-%d')".log;;
+  schedule) systemctl list-timers vbackup-backup.timer --no-pager;;
+  menu) select item in "Backup now" "Restore" "Status" "Snapshots" "Environment test" "Verify restore" "Configuration" "Update" "Logs" "Exit"; do case "$REPLY" in 1) "$ROOT/backup.sh";; 2) "$ROOT/restore.sh";; 3) systemctl status vbackup-backup.timer --no-pager;; 4) "$0" snapshots;; 5) "$0" test;; 6) "$ROOT/verify.sh";; 7) ${EDITOR:-vi} /etc/vbackup/server.conf;; 8) "$ROOT/update.sh";; 9) "$0" logs;; 10) exit 0;; esac; done;;
+  *) echo "Usage: vbackup {backup|restore|status|snapshots|test|verify|update|logs|schedule}"; exit 2;;
+esac
