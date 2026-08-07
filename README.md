@@ -19,6 +19,8 @@ curl -fsSL https://raw.githubusercontent.com/J2026-dev/vbakup/main/install.sh | 
 
 安装向导会自动下载 `https://github.com/J2026-dev/vbakup` 的源码、安装依赖、创建 `/usr/local/bin/vbackup` 命令、配置 systemd timer，并引导你填写 Google Drive、Restic 与 Telegram 配置。
 
+> 一键安装命令通过管道执行脚本，但安装器会从 `/dev/tty` 读取交互输入；看到 `Google Drive Client Secret` 或 `Refresh Token` 时输入不会显示，这是正常的，直接按回车即可跳过可选项。
+
 ## 中文安装步骤
 
 ### 1. 准备系统

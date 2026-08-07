@@ -10,16 +10,32 @@ require_root() {
   [[ "${EUID:-$(id -u)}" -eq 0 ]] || { echo "Run as root or use: curl -fsSL https://raw.githubusercontent.com/J2026-dev/vbakup/main/install.sh | sudo bash" >&2; exit 1; }
 }
 
+require_tty() {
+  [[ -r /dev/tty ]] || { echo "This installer needs an interactive TTY for configuration prompts." >&2; exit 1; }
+}
+
 prompt_secret() {
   local name="$1" var
-  read -r -s -p "$name: " var
-  echo
+  require_tty
+  printf '%s: ' "$name" >/dev/tty
+  IFS= read -r -s var </dev/tty
+  printf '\n' >/dev/tty
   printf '%s' "$var"
+}
+
+prompt_input() {
+  local prompt="$1" value
+  require_tty
+  printf '%s: ' "$prompt" >/dev/tty
+  IFS= read -r value </dev/tty
+  printf '%s' "$value"
 }
 
 prompt_default() {
   local prompt="$1" default="$2" value
-  read -r -p "$prompt [$default]: " value
+  require_tty
+  printf '%s [%s]: ' "$prompt" "$default" >/dev/tty
+  IFS= read -r value </dev/tty
   printf '%s' "${value:-$default}"
 }
 
@@ -103,12 +119,12 @@ main() {
   server_id="$(prompt_default "Server Name / 当前 VPS 唯一名称" "$(hostname -s 2>/dev/null || echo vps-01)")"
   remote="$(prompt_default "Google Drive rclone remote 名称" "gdrive")"
   echo "如果 '${remote}' 已通过 rclone config 配置，下面三个 Google OAuth 字段可直接回车跳过。"
-  read -r -p "Google Drive Client ID: " client_id
-  client_secret="$(prompt_secret "Google Drive Client Secret")"
-  refresh_token="$(prompt_secret "Google Drive Refresh Token")"
+  client_id="$(prompt_input "Google Drive Client ID（可留空）")"
+  client_secret="$(prompt_secret "Google Drive Client Secret（可留空，输入时不显示）")"
+  refresh_token="$(prompt_secret "Google Drive Refresh Token（可留空，输入时不显示）")"
   restic_password="$(prompt_secret "Restic Password / Restic 加密密码")"
-  read -r -p "Telegram Token (optional): " telegram_token
-  read -r -p "Telegram Chat ID (optional): " telegram_chat_id
+  telegram_token="$(prompt_input "Telegram Token（可留空）")"
+  telegram_chat_id="$(prompt_input "Telegram Chat ID（可留空）")"
 
   configure_rclone_google_drive "$remote" "$client_id" "$client_secret" "$refresh_token"
   write_config "$server_id" "$remote" "$restic_password" "$telegram_token" "$telegram_chat_id"
