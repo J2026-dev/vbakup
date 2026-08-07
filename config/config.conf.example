@@ -1,0 +1,7 @@
+SERVER_ID="hk-vps-01"
+RCLONE_REMOTE="gdrive"
+RESTIC_REPOSITORY="rclone:gdrive:VBackup/hk-vps-01"
+RESTIC_PASSWORD="change-me"
+TELEGRAM_TOKEN=""
+TELEGRAM_CHAT_ID=""
+KEEP_LAST="3"
