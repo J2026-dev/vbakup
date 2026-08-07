@@ -2,6 +2,23 @@
 
 VBackup DR（VPS Backup & Disaster Recovery）是一个面向 Ubuntu / Debian VPS 的 Bash 自动备份与灾难恢复框架。它会自动发现 Docker、数据库、网站、systemd 服务与网络配置，生成 `manifest.json`，并通过 Restic + rclone 将加密增量备份上传到每台服务器独立的 Google Drive Repository。
 
+
+## 一键安装
+
+在全新的 Ubuntu / Debian VPS 上，可以直接执行以下命令从 GitHub 仓库下载安装向导：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/J2026-dev/vbakup/main/install.sh | sudo bash
+```
+
+如果仓库默认分支不是 `main`，可以指定分支，例如：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/J2026-dev/vbakup/main/install.sh | sudo VBACKUP_BRANCH=master bash
+```
+
+安装向导会自动下载 `https://github.com/J2026-dev/vbakup` 的源码、安装依赖、创建 `/usr/local/bin/vbackup` 命令、配置 systemd timer，并引导你填写 Google Drive、Restic 与 Telegram 配置。
+
 ## 中文安装步骤
 
 ### 1. 准备系统
@@ -28,7 +45,7 @@ cd /path/to/vbackup
 如果是从 Git 仓库安装，请先克隆项目并进入目录：
 
 ```bash
-git clone <your-vbackup-repo-url> vbackup
+git clone https://github.com/J2026-dev/vbakup vbackup
 cd vbackup
 ```
 
@@ -44,6 +61,9 @@ sudo ./install.sh
 
 - Server Name：当前 VPS 的唯一名称，例如 `hk-vps-01`
 - Google Drive rclone remote：rclone 中配置的 Google Drive remote 名称，默认 `gdrive`
+- Google Drive Client ID：Google Drive OAuth Client ID；如果 remote 已配置可留空
+- Google Drive Client Secret：Google Drive OAuth Client Secret；如果 remote 已配置可留空
+- Google Drive Refresh Token：Google Drive Refresh Token；如果 remote 已配置可留空
 - Restic Password：Restic 仓库加密密码
 - Telegram Token：Telegram Bot Token，可留空
 - Telegram Chat ID：Telegram 接收通知的 Chat ID，可留空
