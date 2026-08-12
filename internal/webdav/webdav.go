@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
 type Client struct {
@@ -22,7 +23,7 @@ func New(rawURL, username, password string) (*Client, error) {
 		return nil, fmt.Errorf("invalid WebDAV URL")
 	}
 	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
-	return &Client{base: strings.TrimRight(u.String(), "/"), user: username, password: password, client: &http.Client{Transport: transport, Timeout: 0}}, nil
+	return &Client{base: strings.TrimRight(u.String(), "/"), user: username, password: password, client: &http.Client{Transport: transport, Timeout: 30 * time.Second}}, nil
 }
 
 func (c *Client) request(method, name string, body io.Reader) (*http.Response, error) {
@@ -36,6 +37,10 @@ func (c *Client) request(method, name string, body io.Reader) (*http.Response, e
 	}
 	if method == http.MethodPut {
 		req.Header.Set("Content-Type", "application/octet-stream")
+	}
+	if method == "PROPFIND" {
+		req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+		req.Header.Set("Depth", "0")
 	}
 	return c.client.Do(req)
 }

@@ -19,6 +19,7 @@ type Settings struct {
 type Node struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
+	Note         string    `json:"note,omitempty"`
 	TokenHash    string    `json:"token_hash,omitempty"`
 	Status       string    `json:"status"`
 	LastSeen     time.Time `json:"last_seen"`
@@ -83,6 +84,7 @@ type Backup struct {
 	ID           string    `json:"id"`
 	TaskID       string    `json:"task_id"`
 	NodeID       string    `json:"node_id"`
+	NodeName     string    `json:"node_name,omitempty"`
 	RepositoryID string    `json:"repository_id"`
 	RemotePath   string    `json:"remote_path"`
 	Size         int64     `json:"size"`

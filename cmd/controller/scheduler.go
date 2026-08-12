@@ -60,7 +60,14 @@ func (s *server) queueBackup(taskID string, force bool) (model.Command, error) {
 			return model.Command{}, errors.New("任务尚未到执行时间")
 		}
 	}
-	command := model.Command{ID: id.New("cmd"), NodeID: task.NodeID, Type: "backup", Task: task, Payload: map[string]any{"repository_id": task.RepositoryID}, CreatedAt: time.Now().UTC()}
+	nodeName := task.NodeID
+	for _, node := range state.Nodes {
+		if node.ID == task.NodeID {
+			nodeName = nodeDisplayName(node)
+			break
+		}
+	}
+	command := model.Command{ID: id.New("cmd"), NodeID: task.NodeID, Type: "backup", Task: task, Payload: map[string]any{"repository_id": task.RepositoryID, "node_name": nodeName}, CreatedAt: time.Now().UTC()}
 	queuedCommand, err := cloneCommand(command)
 	if err != nil {
 		return model.Command{}, err

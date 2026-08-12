@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	agentlib "github.com/J2026-dev/vbakup/internal/agent"
 	"github.com/J2026-dev/vbakup/internal/model"
@@ -168,7 +169,12 @@ func (a *app) backup(command model.Command) model.CommandResult {
 	if err != nil {
 		return failure(err.Error())
 	}
-	remote := path.Join(repo.BasePath, a.config.NodeID, command.Task.ID, time.Now().UTC().Format("20060102T150405Z")+".tar.gz")
+	nodeName, _ := command.Payload["node_name"].(string)
+	nodeKeyword := safeRemoteKeyword(nodeName)
+	if nodeKeyword == "" {
+		nodeKeyword = safeRemoteKeyword(a.config.NodeID)
+	}
+	remote := path.Join(repo.BasePath, nodeKeyword+"-"+shortID(a.config.NodeID), command.Task.ID, time.Now().UTC().Format("20060102T150405Z")+"-"+nodeKeyword+".tar.gz")
 	file, err := os.Open(archive)
 	if err != nil {
 		return failure(err.Error())
@@ -186,6 +192,32 @@ func (a *app) backup(command model.Command) model.CommandResult {
 		message = fmt.Sprintf("backup uploaded with %d warning(s)", len(manifest.Warnings))
 	}
 	return model.CommandResult{Status: "success", Message: message, Backup: &model.Backup{RepositoryID: command.Task.RepositoryID, RemotePath: remote, Size: size, SHA256: hash, Services: agentlib.ServiceNames(manifest.Discovery)}}
+}
+
+func safeRemoteKeyword(value string) string {
+	value = strings.TrimSpace(value)
+	var output []rune
+	lastDash := false
+	for _, r := range value {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '.' {
+			output = append(output, r)
+			lastDash = false
+		} else if !lastDash && len(output) > 0 {
+			output = append(output, '-')
+			lastDash = true
+		}
+		if len(output) >= 48 {
+			break
+		}
+	}
+	return strings.Trim(string(output), "-.")
+}
+
+func shortID(value string) string {
+	if len(value) > 8 {
+		return value[len(value)-8:]
+	}
+	return value
 }
 
 func (a *app) restore(command model.Command) model.CommandResult {

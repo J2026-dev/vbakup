@@ -20,6 +20,7 @@ import (
 	"github.com/J2026-dev/vbakup/internal/model"
 	"github.com/J2026-dev/vbakup/internal/store"
 	"github.com/J2026-dev/vbakup/internal/vault"
+	"github.com/J2026-dev/vbakup/internal/webdav"
 )
 
 //go:embed assets/*
@@ -56,6 +57,7 @@ func (s *server) routes() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.Handle("GET /api/state", s.admin(http.HandlerFunc(s.handleState)))
+	mux.Handle("PATCH /api/nodes/{id}", s.admin(http.HandlerFunc(s.handleUpdateNode)))
 	mux.Handle("POST /api/repositories", s.admin(http.HandlerFunc(s.handleCreateRepository)))
 	mux.Handle("POST /api/tasks", s.admin(http.HandlerFunc(s.handleCreateTask)))
 	mux.Handle("POST /api/tasks/{id}/run", s.admin(http.HandlerFunc(s.handleRunTask)))
@@ -100,7 +102,47 @@ func (s *server) handleState(w http.ResponseWriter, _ *http.Request) {
 		repos = append(repos, repositoryView{ID: r.ID, Name: r.Name, URL: r.URL, Username: r.Username, BasePath: r.BasePath, CreatedAt: r.CreatedAt})
 	}
 	command := fmt.Sprintf("curl -fsSL %s/install.sh | sudo sh -s -- --controller %s --secret %s", s.publicURL, s.publicURL, s.bootstrapSecret)
-	writeJSON(w, http.StatusOK, publicState{Nodes: state.Nodes, Repositories: repos, Tasks: state.Tasks, Backups: state.Backups, Operations: state.Operations, InstallCommand: command})
+	writeJSON(w, http.StatusOK, publicState{
+		Nodes: append([]model.Node{}, state.Nodes...), Repositories: repos,
+		Tasks: append([]model.Task{}, state.Tasks...), Backups: append([]model.Backup{}, state.Backups...),
+		Operations: append([]model.Operation{}, state.Operations...), InstallCommand: command,
+	})
+}
+
+func (s *server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Note string `json:"note"`
+	}
+	if decodeJSON(r, &in) != nil {
+		writeError(w, http.StatusBadRequest, "备注格式无效")
+		return
+	}
+	in.Note = strings.TrimSpace(in.Note)
+	if len([]rune(in.Note)) > 80 {
+		writeError(w, http.StatusBadRequest, "备注不能超过 80 个字符")
+		return
+	}
+	var updated model.Node
+	err := s.store.Update(func(state *model.State) error {
+		for i := range state.Nodes {
+			if state.Nodes[i].ID == r.PathValue("id") {
+				state.Nodes[i].Note = in.Note
+				updated = state.Nodes[i]
+				return nil
+			}
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "节点不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "备注保存失败")
+		return
+	}
+	updated.TokenHash = ""
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *server) handleCreateRepository(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +160,11 @@ func (s *server) handleCreateRepository(w http.ResponseWriter, r *http.Request) 
 	u, err := url.ParseRequestURI(in.URL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		writeError(w, http.StatusBadRequest, "WebDAV 地址无效")
+		return
+	}
+	dav, err := webdav.New(strings.TrimRight(in.URL, "/"), in.Username, in.Password)
+	if err != nil || dav.Test() != nil {
+		writeError(w, http.StatusBadGateway, "无法连接 WebDAV，请检查地址、用户名、密码及服务端权限")
 		return
 	}
 	encrypted, err := s.vault.Encrypt(in.Password)
@@ -392,6 +439,7 @@ func (s *server) handleCommandResult(w http.ResponseWriter, r *http.Request) {
 			result.Backup.ID = id.New("backup")
 			result.Backup.TaskID = command.Task.ID
 			result.Backup.NodeID = node.ID
+			result.Backup.NodeName = nodeDisplayName(node)
 			result.Backup.CreatedAt = time.Now().UTC()
 			st.Backups = append([]model.Backup{*result.Backup}, st.Backups...)
 		}
@@ -456,6 +504,12 @@ func cleanPaths(paths []string) []string {
 		}
 	}
 	return out
+}
+func nodeDisplayName(node model.Node) string {
+	if strings.TrimSpace(node.Note) != "" {
+		return strings.TrimSpace(node.Note)
+	}
+	return strings.TrimSpace(node.Name)
 }
 func decodeJSON(r *http.Request, v any) error {
 	defer r.Body.Close()

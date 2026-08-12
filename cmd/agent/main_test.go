@@ -2,10 +2,21 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/J2026-dev/vbakup/internal/model"
 )
+
+func TestSafeRemoteKeyword(t *testing.T) {
+	got := safeRemoteKeyword(" 香港 主站 / DB #1 ")
+	if got != "香港-主站-DB-1" {
+		t.Fatalf("got %q", got)
+	}
+	if strings.ContainsAny(got, "/\\") {
+		t.Fatalf("unsafe keyword %q", got)
+	}
+}
 
 func TestCommandResultsPersistAcrossRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "results.json")
