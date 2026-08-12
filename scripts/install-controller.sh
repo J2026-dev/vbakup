@@ -34,17 +34,39 @@ install_docker() {
     docker compose version >/dev/null 2>&1 || { echo "Docker Compose plugin is required." >&2; exit 1; }
     return
   elif command -v apt-get >/dev/null 2>&1; then
+    # Docker's convenience script currently requests optional packages that are
+    # unavailable on older Ubuntu releases. Install only the required packages.
+    [ -r /etc/os-release ] || { echo "Cannot identify this Linux distribution." >&2; exit 1; }
+    . /etc/os-release
+    case "${ID:-}" in
+      ubuntu|debian) ;;
+      *) echo "Unsupported apt distribution: ${ID:-unknown}. Install Docker Compose first." >&2; exit 1 ;;
+    esac
+    CODENAME=${VERSION_CODENAME:-}
+    if [ -z "$CODENAME" ] && command -v lsb_release >/dev/null 2>&1; then
+      CODENAME=$(lsb_release -cs)
+    fi
+    [ -n "$CODENAME" ] || { echo "Cannot determine the distribution codename." >&2; exit 1; }
+
     apt-get update
-    apt-get install -y ca-certificates curl
+    DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc
+    chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/${ID} ${CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+      docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y ca-certificates curl
+    curl -fsSL https://get.docker.com | sh
   elif command -v yum >/dev/null 2>&1; then
     yum install -y ca-certificates curl
+    curl -fsSL https://get.docker.com | sh
   else
     echo "Unsupported Linux package manager. Install Docker Compose first." >&2
     exit 1
   fi
-  curl -fsSL https://get.docker.com | sh
   systemctl enable --now docker 2>/dev/null || service docker start
   docker compose version >/dev/null 2>&1 || { echo "Docker Compose plugin is required." >&2; exit 1; }
 }

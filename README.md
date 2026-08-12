@@ -51,6 +51,8 @@ curl -fsSL https://raw.githubusercontent.com/J2026-dev/vbakup/main/scripts/insta
   | sudo sh -s -- --domain backup.example.com
 ```
 
+如果 Docker 安装曾在 `docker-model-plugin` 处失败，先更新到最新仓库代码，再直接重新运行上面的同一条命令；安装脚本会复用已有配置并继续安装。Ubuntu 20.04 已停止标准支持，脚本仍可安装 Docker，但生产环境建议升级到 Ubuntu 22.04 或 24.04 LTS。
+
 安装器会自动完成：
 
 - 安装 Docker 与 Compose（若尚未安装）；
