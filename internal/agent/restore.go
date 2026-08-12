@@ -37,15 +37,6 @@ func RestoreServices(metadataRoot, destinationRoot string, manifest Manifest) []
 			warnings = append(warnings, fmt.Sprintf("restart %s: %v", unit, err))
 		}
 	}
-	for _, dump := range manifest.DatabaseDumps {
-		file := filepath.Join(metadata, dump)
-		switch dump {
-		case "mysql.sql":
-			warnings = appendCommandWarning(warnings, "mysql restore", file, "mysql")
-		case "postgresql.sql":
-			warnings = appendCommandWarning(warnings, "postgres restore", file, "psql", "-U", "postgres")
-		}
-	}
 	for _, project := range manifest.Discovery.ComposeProjects {
 		directory, err := destinationPath(destinationRoot, project)
 		if err != nil {
@@ -62,6 +53,38 @@ func RestoreServices(metadataRoot, destinationRoot string, manifest Manifest) []
 		if output, runErr := command.CombinedOutput(); runErr != nil {
 			warnings = append(warnings, fmt.Sprintf("compose %s: %v: %s", project, runErr, strings.TrimSpace(string(output))))
 		}
+	}
+	for _, dump := range manifest.DatabaseDumps {
+		file := filepath.Join(metadata, dump)
+		switch {
+		case dump == "mysql.sql":
+			warnings = appendCommandWarning(warnings, "mysql restore", file, "mysql")
+		case dump == "postgresql.sql":
+			warnings = appendCommandWarning(warnings, "postgres restore", file, "psql", "-U", "postgres")
+		case strings.HasPrefix(dump, "mysql-") && strings.HasSuffix(dump, ".sql"):
+			container := strings.TrimSuffix(strings.TrimPrefix(dump, "mysql-"), ".sql")
+			warnings = appendDockerCommandWarning(warnings, "docker mysql restore", file, container, "sh", "-c", "mysql -uroot")
+		case strings.HasPrefix(dump, "postgresql-") && strings.HasSuffix(dump, ".sql"):
+			container := strings.TrimSuffix(strings.TrimPrefix(dump, "postgresql-"), ".sql")
+			warnings = appendDockerCommandWarning(warnings, "docker postgres restore", file, container, "sh", "-c", "psql -U postgres")
+		case strings.HasPrefix(dump, "redis-") && strings.HasSuffix(dump, ".rdb"):
+			container := strings.TrimSuffix(strings.TrimPrefix(dump, "redis-"), ".rdb")
+			warnings = appendDockerRedisRestore(warnings, "docker redis restore", file, container)
+		}
+	}
+	return warnings
+}
+
+func appendDockerRedisRestore(warnings []string, label, input, container string) []string {
+	if err := exec.Command("docker", "stop", "-t", "30", container).Run(); err != nil {
+		return append(warnings, fmt.Sprintf("%s stop: %v", label, err))
+	}
+	if output, err := exec.Command("docker", "cp", input, container+":/data/dump.rdb").CombinedOutput(); err != nil {
+		_ = exec.Command("docker", "start", container).Run()
+		return append(warnings, fmt.Sprintf("%s copy: %v: %s", label, err, strings.TrimSpace(string(output))))
+	}
+	if err := exec.Command("docker", "start", container).Run(); err != nil {
+		return append(warnings, fmt.Sprintf("%s start: %v", label, err))
 	}
 	return warnings
 }
@@ -128,6 +151,20 @@ func appendCommandWarning(warnings []string, label, input, name string, args ...
 	}
 	defer file.Close()
 	command := exec.Command(name, args...)
+	command.Stdin = file
+	if output, runErr := command.CombinedOutput(); runErr != nil {
+		return append(warnings, fmt.Sprintf("%s: %v: %s", label, runErr, strings.TrimSpace(string(output))))
+	}
+	return warnings
+}
+
+func appendDockerCommandWarning(warnings []string, label, input, container string, args ...string) []string {
+	file, err := os.Open(input)
+	if err != nil {
+		return append(warnings, label+": "+err.Error())
+	}
+	defer file.Close()
+	command := exec.Command("docker", append([]string{"exec", "-i", container}, args...)...)
 	command.Stdin = file
 	if output, runErr := command.CombinedOutput(); runErr != nil {
 		return append(warnings, fmt.Sprintf("%s: %v: %s", label, runErr, strings.TrimSpace(string(output))))

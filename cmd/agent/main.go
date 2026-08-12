@@ -187,11 +187,33 @@ func (a *app) backup(command model.Command) model.CommandResult {
 	if err = dav.Put(remote, file); err != nil {
 		return failure(err.Error())
 	}
+	// Read the object back immediately. This catches WebDAV gateways that
+	// acknowledge PUT before the complete object is committed.
+	check, err := dav.Get(remote)
+	if err != nil {
+		return failure("backup upload verification failed: " + err.Error())
+	}
+	verifiedArchive := archive + ".verify"
+	verifyFile, createErr := os.Create(verifiedArchive)
+	if createErr == nil {
+		_, createErr = io.Copy(verifyFile, check)
+		closeErr := verifyFile.Close()
+		if createErr == nil { createErr = closeErr }
+	}
+	_ = check.Close()
+	defer os.Remove(verifiedArchive)
+	if createErr != nil {
+		return failure("backup upload verification failed: " + createErr.Error())
+	}
+	verifiedHash, verifiedSize, verifyErr := agentlib.FileSHA256(verifiedArchive)
+	if verifyErr != nil || !strings.EqualFold(verifiedHash, hash) || verifiedSize != size {
+		return model.CommandResult{Status: "failed", Message: fmt.Sprintf("backup upload verification mismatch: expected sha256=%s size=%d, got sha256=%s size=%d", hash, size, verifiedHash, verifiedSize), Details: map[string]any{"remote_path": remote, "expected_sha256": hash, "actual_sha256": verifiedHash, "expected_size": size, "actual_size": verifiedSize}}
+	}
 	message := "backup uploaded"
 	if len(manifest.Warnings) > 0 {
 		message = fmt.Sprintf("backup uploaded with %d warning(s)", len(manifest.Warnings))
 	}
-	return model.CommandResult{Status: "success", Message: message, Backup: &model.Backup{RepositoryID: command.Task.RepositoryID, RemotePath: remote, Size: size, SHA256: hash, Services: agentlib.ServiceNames(manifest.Discovery)}}
+	return model.CommandResult{Status: "success", Message: message, Details: map[string]any{"discovered_paths": manifest.Paths, "discovered_services": agentlib.ServiceNames(manifest.Discovery), "files": manifest.Files, "bytes": manifest.Bytes, "warnings": manifest.Warnings}, Backup: &model.Backup{RepositoryID: command.Task.RepositoryID, RemotePath: remote, Size: size, SHA256: hash, Services: agentlib.ServiceNames(manifest.Discovery), Files: manifest.Files, ArchiveBytes: manifest.Bytes, Warnings: manifest.Warnings}}
 }
 
 func safeRemoteKeyword(value string) string {
@@ -258,9 +280,9 @@ func (a *app) restore(command model.Command) model.CommandResult {
 		return failure(err.Error())
 	}
 	_ = tmp.Close()
-	hash, _, err := agentlib.FileSHA256(archive)
-	if err != nil || !strings.EqualFold(hash, backup.SHA256) {
-		return failure("backup checksum mismatch")
+	hash, actualSize, err := agentlib.FileSHA256(archive)
+	if err != nil || !strings.EqualFold(hash, backup.SHA256) || (backup.Size > 0 && actualSize != backup.Size) {
+		return model.CommandResult{Status: "failed", Message: fmt.Sprintf("backup checksum mismatch: expected sha256=%s size=%d, got sha256=%s size=%d", backup.SHA256, backup.Size, hash, actualSize), Details: map[string]any{"remote_path": backup.RemotePath, "expected_sha256": backup.SHA256, "actual_sha256": hash, "expected_size": backup.Size, "actual_size": actualSize}}
 	}
 	if err = os.MkdirAll("/var/lib/vbakup", 0700); err != nil {
 		return failure(err.Error())

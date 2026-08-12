@@ -79,6 +79,8 @@ random_secret() {
 install_docker
 install -d -m 0700 "$INSTALL_DIR/data"
 curl -fsSL "$REPO_RAW/compose.yaml" -o "$INSTALL_DIR/compose.yaml"
+curl -fsSL "$REPO_RAW/scripts/vbakupctl.sh" -o /usr/local/bin/vbakupctl
+chmod 0755 /usr/local/bin/vbakupctl
 
 if [ -f "$INSTALL_DIR/.env" ]; then
   ADMIN_PASSWORD=$(sed -n 's/^VBAKUP_ADMIN_PASSWORD=//p' "$INSTALL_DIR/.env")
@@ -129,4 +131,5 @@ Credentials are saved in $INSTALL_DIR/.env (mode 0600).
 DNS must point $DOMAIN to this VPS. Caddy will request the HTTPS certificate automatically.
 Check status: cd $INSTALL_DIR && docker compose ps
 View logs:   cd $INSTALL_DIR && docker compose logs -f
+Quick status: vbakupctl status
 EOF

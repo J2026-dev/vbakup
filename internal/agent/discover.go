@@ -48,7 +48,9 @@ func Discover() Discovery {
 			services = append(services, service)
 		}
 	}
-	for _, p := range []string{"/etc", "/home", "/root", "/var/www", "/opt"} {
+	// These roots cover application data and logs without archiving the OS
+	// binaries or virtual filesystems under /bin, /usr and /proc-like mounts.
+	for _, p := range []string{"/etc", "/home", "/root", "/opt", "/srv", "/var/www", "/var/log", "/var/lib", "/usr/local/etc", "/usr/local/bin"} {
 		if _, err := os.Stat(p); err == nil {
 			pathSet[p] = true
 		}

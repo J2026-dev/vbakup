@@ -14,6 +14,8 @@
 - 数据库优先执行逻辑一致性导出；Docker 保存 inspect、Compose、原工作目录和 `.env` 元数据。
 - 支持每小时、每 6 小时、每 12 小时、每天、每周以及 API 自定义 Go duration（最短 15 分钟）。
 - 备份上传前记录 SHA-256；恢复下载后强制复验，归档解包防路径穿越。
+- 自动合并服务发现与用户附加路径，覆盖应用配置、用户数据、`/srv`、`/opt`、`/var/lib`、`/var/log` 等；排除虚拟文件系统、缓存和运行时目录。
+- Docker 备份记录容器原运行状态，短暂停止运行容器后归档持久卷/绑定目录，并在完成后恢复原状态；数据库优先使用官方逻辑导出工具。
 - 原 VPS 损坏后，在新 VPS 执行相同安装命令，再从控制台选择备份和新节点恢复。
 - WebDAV 密码由主控本地 AES-GCM 主密钥加密；agent token 仅保存 SHA-256 哈希。
 - 被控只发起 `443/tcp` 出站请求，可置于 NAT、防火墙或 Cloudflare 代理之后。
@@ -158,6 +160,18 @@ docker compose ps
 docker compose logs -f
 docker compose pull && docker compose up -d
 ```
+
+一键安装会同时安装 `vbakupctl`：
+
+```bash
+vbakupctl status
+vbakupctl logs
+vbakupctl update
+vbakupctl delete backup BACKUP_ID
+vbakupctl delete node NODE_ID
+```
+
+`status` 会显示主控容器、Docker 空间、主控数据目录及节点/计划/快照/空间数量。删除命令会提示输入当前管理员密码，并使用与 Web 面板相同的引用保护。
 
 ## 开发
 

@@ -102,6 +102,61 @@ func TestCreateRepositoryChecksWebDAVBeforeSaving(t *testing.T) {
 	}
 }
 
+func TestDeleteReferencedNodeAndRepositoryIsRejected(t *testing.T) {
+	app, state := newTestServer(t)
+	if err := state.Update(func(st *model.State) error {
+		st.Nodes = append(st.Nodes, model.Node{ID: "node-1"})
+		st.Repositories = append(st.Repositories, model.Repository{ID: "repo-1"})
+		st.Tasks = append(st.Tasks, model.Task{ID: "task-1", NodeID: "node-1", RepositoryID: "repo-1"})
+		return nil
+	}); err != nil { t.Fatal(err) }
+	for _, test := range []struct{ path, id string; handler http.HandlerFunc }{
+		{"/api/nodes/node-1", "node-1", app.handleDeleteNode},
+		{"/api/repositories/repo-1", "repo-1", app.handleDeleteRepository},
+	} {
+		request := httptest.NewRequest(http.MethodDelete, test.path, nil)
+		request.SetPathValue("id", test.id)
+		response := httptest.NewRecorder()
+		test.handler(response, request)
+		if response.Code != http.StatusConflict { t.Fatalf("%s status=%d body=%s", test.path, response.Code, response.Body.String()) }
+	}
+}
+
+func TestDeleteBackupRemovesRemoteObjectAndIndex(t *testing.T) {
+	deleted := false
+	davServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/snapshot.tar.gz") { deleted = true; w.WriteHeader(http.StatusNoContent); return }
+		http.NotFound(w, r)
+	}))
+	defer davServer.Close()
+	app, state := newTestServer(t)
+	encrypted, err := app.vault.Encrypt("password")
+	if err != nil { t.Fatal(err) }
+	if err = state.Update(func(st *model.State) error {
+		st.Repositories = append(st.Repositories, model.Repository{ID: "repo-1", URL: davServer.URL, PasswordEncrypted: encrypted})
+		st.Backups = append(st.Backups, model.Backup{ID: "backup-1", RepositoryID: "repo-1", RemotePath: "snapshot.tar.gz"})
+		return nil
+	}); err != nil { t.Fatal(err) }
+	request := httptest.NewRequest(http.MethodDelete, "/api/backups/backup-1", nil)
+	request.SetPathValue("id", "backup-1")
+	response := httptest.NewRecorder()
+	app.handleDeleteBackup(response, request)
+	if response.Code != http.StatusOK || !deleted || len(state.Snapshot().Backups) != 0 { t.Fatalf("status=%d deleted=%v body=%s", response.Code, deleted, response.Body.String()) }
+}
+
+func TestChangePasswordPersistsEncryptedValueAndRevokesSessions(t *testing.T) {
+	app, state := newTestServer(t)
+	app.adminPassword = "old-password-value"
+	app.sessions = map[string]uint64{"old-session": 0}
+	request := httptest.NewRequest(http.MethodPost, "/api/admin/password", strings.NewReader(`{"current_password":"old-password-value","new_password":"new-password-value-123"}`))
+	response := httptest.NewRecorder()
+	app.handleChangePassword(response, request)
+	if response.Code != http.StatusOK { t.Fatalf("status=%d body=%s", response.Code, response.Body.String()) }
+	if app.adminPassword != "new-password-value-123" || len(app.sessions) != 0 { t.Fatal("password or sessions were not updated") }
+	encrypted := state.Snapshot().Settings.AdminPasswordEncrypted
+	if encrypted == "" || strings.Contains(encrypted, "new-password") { t.Fatal("password was not encrypted") }
+}
+
 func TestQueuedCommandDoesNotPersistRepositoryPassword(t *testing.T) {
 	dataDir := t.TempDir()
 	statePath := filepath.Join(dataDir, "state.json")

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
@@ -23,16 +24,18 @@ type Manifest struct {
 	Paths         []string  `json:"paths"`
 	DatabaseDumps []string  `json:"database_dumps,omitempty"`
 	Warnings      []string  `json:"warnings,omitempty"`
+	Files         int64     `json:"files"`
+	Bytes         int64     `json:"bytes"`
 }
 
 var excludedPrefixes = []string{"/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/var/cache", "/var/lib/vbakup", "/var/lib/docker/overlay2"}
 
 func CreateArchive(destination string, configured []string, includeDocker, includeDatabases bool) (Manifest, error) {
-	discovery := Discover()
-	paths := cleanAbsolutePaths(configured)
-	if len(paths) == 0 {
-		paths = cleanAbsolutePaths(discovery.Paths)
-	}
+	return createArchive(destination, configured, includeDocker, includeDatabases, Discover())
+}
+
+func createArchive(destination string, configured []string, includeDocker, includeDatabases bool, discovery Discovery) (Manifest, error) {
+	paths := cleanAbsolutePaths(append(append([]string{}, configured...), discovery.Paths...))
 	host, _ := os.Hostname()
 	manifest := Manifest{Version: 1, CreatedAt: time.Now().UTC(), Hostname: host, Discovery: discovery, Paths: paths}
 	stage, err := os.MkdirTemp("", "vbakup-stage-")
@@ -40,7 +43,23 @@ func CreateArchive(destination string, configured []string, includeDocker, inclu
 		return manifest, err
 	}
 	defer os.RemoveAll(stage)
+	var restartContainers []string
+	restarted := false
 	if includeDocker && len(discovery.DockerContainers) > 0 {
+		// Logical dumps must run while containers are still available. They are
+		// written into the staging area and then included with the stopped-volume
+		// archive below.
+		if includeDatabases {
+			manifest.DatabaseDumps, manifest.Warnings = dumpDockerDatabases(stage, discovery.DockerContainers, manifest.DatabaseDumps, manifest.Warnings)
+		}
+		// Stop running containers before database exports and filesystem traversal
+		// so mounted volumes and application state are captured consistently.
+		restartContainers, manifest.Warnings = stopRunningContainers(discovery.DockerContainers, manifest.Warnings)
+		defer func() {
+			if len(restartContainers) > 0 && !restarted {
+				_, manifest.Warnings = startContainers(restartContainers, manifest.Warnings)
+			}
+		}()
 		args := append([]string{"inspect"}, discovery.DockerContainers...)
 		if out, e := exec.Command("docker", args...).CombinedOutput(); e == nil {
 			_ = os.WriteFile(filepath.Join(stage, "docker-inspect.json"), out, 0600)
@@ -50,11 +69,9 @@ func CreateArchive(destination string, configured []string, includeDocker, inclu
 		captureDockerCompose(stage, &manifest)
 	}
 	if includeDatabases {
-		manifest.DatabaseDumps, manifest.Warnings = dumpDatabases(stage, manifest.Warnings)
-	}
-	manifestBytes, _ := json.MarshalIndent(manifest, "", "  ")
-	if err = os.WriteFile(filepath.Join(stage, "manifest.json"), manifestBytes, 0600); err != nil {
-		return manifest, err
+		var hostDumps []string
+		hostDumps, manifest.Warnings = dumpDatabases(stage, manifest.Warnings)
+		manifest.DatabaseDumps = append(manifest.DatabaseDumps, hostDumps...)
 	}
 	f, err := os.Create(destination)
 	if err != nil {
@@ -62,13 +79,34 @@ func CreateArchive(destination string, configured []string, includeDocker, inclu
 	}
 	gz := gzip.NewWriter(f)
 	tw := tar.NewWriter(gz)
-	for _, root := range append([]string{stage}, paths...) {
+	// Add user/application roots first so traversal warnings and byte counts
+	// are final before the manifest is written into the archive.
+	for _, root := range paths {
 		if err = addTree(tw, root, stage, &manifest); err != nil {
 			_ = tw.Close()
 			_ = gz.Close()
 			_ = f.Close()
 			return manifest, err
 		}
+	}
+	// Restart containers before writing the manifest so restart warnings are
+	// persisted in the archive as well as returned to the controller.
+	if len(restartContainers) > 0 {
+		_, manifest.Warnings = startContainers(restartContainers, manifest.Warnings)
+		restarted = true
+	}
+	manifestBytes, _ := json.MarshalIndent(manifest, "", "  ")
+	if err = os.WriteFile(filepath.Join(stage, "manifest.json"), manifestBytes, 0600); err != nil {
+		_ = tw.Close()
+		_ = gz.Close()
+		_ = f.Close()
+		return manifest, err
+	}
+	if err = addTree(tw, stage, stage, &manifest); err != nil {
+		_ = tw.Close()
+		_ = gz.Close()
+		_ = f.Close()
+		return manifest, err
 	}
 	if err = tw.Close(); err == nil {
 		err = gz.Close()
@@ -81,6 +119,29 @@ func CreateArchive(destination string, configured []string, includeDocker, inclu
 	return manifest, err
 }
 
+func stopRunningContainers(containers, warnings []string) ([]string, []string) {
+	var running []string
+	for _, name := range containers {
+		if out, err := exec.Command("docker", "inspect", "--format", "{{.State.Running}}", name).Output(); err == nil && strings.TrimSpace(string(out)) == "true" {
+			if err := exec.Command("docker", "stop", "-t", "30", name).Run(); err != nil {
+				warnings = append(warnings, "docker stop "+name+": "+err.Error())
+				continue
+			}
+			running = append(running, name)
+		}
+	}
+	return running, warnings
+}
+
+func startContainers(containers, warnings []string) ([]string, []string) {
+	for _, name := range containers {
+		if err := exec.Command("docker", "start", name).Run(); err != nil {
+			warnings = append(warnings, "docker start "+name+": "+err.Error())
+		}
+	}
+	return containers, warnings
+}
+
 func addTree(tw *tar.Writer, root, stage string, manifest *Manifest) error {
 	root = filepath.Clean(root)
 	return filepath.Walk(root, func(current string, info os.FileInfo, walkErr error) error {
@@ -88,7 +149,8 @@ func addTree(tw *tar.Writer, root, stage string, manifest *Manifest) error {
 			manifest.Warnings = append(manifest.Warnings, current+": "+walkErr.Error())
 			return nil
 		}
-		if current != stage && isExcluded(current) {
+		inStage := current == stage || strings.HasPrefix(current, stage+string(os.PathSeparator))
+		if !inStage && isExcluded(current) {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
@@ -122,6 +184,8 @@ func addTree(tw *tar.Writer, root, stage string, manifest *Manifest) error {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
+		manifest.Files++
+		manifest.Bytes += info.Size()
 		in, err := os.Open(current)
 		if err != nil {
 			manifest.Warnings = append(manifest.Warnings, current+": "+err.Error())
@@ -263,6 +327,85 @@ func dumpDatabases(stage string, warnings []string) ([]string, []string) {
 	}
 	return dumps, warnings
 }
+
+func dumpDockerDatabases(stage string, containers, dumps, warnings []string) ([]string, []string) {
+	for _, container := range containers {
+		image, err := exec.Command("docker", "inspect", "--format", "{{.Config.Image}}", container).Output()
+		if err != nil {
+			continue
+		}
+		kind := strings.ToLower(strings.TrimSpace(string(image)))
+		switch {
+		case strings.Contains(kind, "mysql"), strings.Contains(kind, "mariadb"):
+			name := "mysql-" + safeMetadataName(container) + ".sql"
+			file := filepath.Join(stage, name)
+			if err := dockerExecToFile(container, file, "sh", "-c", "mysqldump --all-databases --single-transaction --routines --events -uroot 2>/dev/null"); err != nil {
+				warnings = append(warnings, "docker mysql dump "+container+": "+err.Error())
+			} else {
+				dumps = append(dumps, name)
+			}
+		case strings.Contains(kind, "postgres"):
+			name := "postgresql-" + safeMetadataName(container) + ".sql"
+			file := filepath.Join(stage, name)
+			if err := dockerExecToFile(container, file, "sh", "-c", "pg_dumpall -U postgres 2>/dev/null"); err != nil {
+				warnings = append(warnings, "docker postgres dump "+container+": "+err.Error())
+			} else {
+				dumps = append(dumps, name)
+			}
+		case strings.Contains(kind, "redis"):
+			name := "redis-" + safeMetadataName(container) + ".rdb"
+			file := filepath.Join(stage, name)
+			if err := dockerExecToFile(container, file, "sh", "-c", "redis-cli --rdb /tmp/vbakup.rdb >/dev/null 2>&1 && cat /tmp/vbakup.rdb"); err != nil {
+				warnings = append(warnings, "docker redis dump "+container+": "+err.Error())
+			} else {
+				dumps = append(dumps, name)
+			}
+		}
+	}
+	return dumps, warnings
+}
+
+func dockerExecToFile(container, destination string, command ...string) error {
+	out, err := os.Create(destination)
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command("docker", append([]string{"exec", container}, command...)...)
+	cmd.Stdout = out
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	closeErr := out.Close()
+	if runErr != nil {
+		_ = os.Remove(destination)
+		if message := strings.TrimSpace(stderr.String()); message != "" {
+			return fmt.Errorf("%w: %s", runErr, message)
+		}
+		return runErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return nil
+}
+
+func safeMetadataName(value string) string {
+	value = strings.TrimSpace(value)
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+		if b.Len() >= 48 {
+			break
+		}
+	}
+	if b.Len() == 0 {
+		return "container"
+	}
+	return b.String()
+}
+
 func captureDockerCompose(stage string, manifest *Manifest) {
 	for _, dir := range manifest.Discovery.ComposeProjects {
 		for _, name := range []string{"compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml", ".env"} {

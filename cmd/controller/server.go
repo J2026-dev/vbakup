@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/J2026-dev/vbakup/internal/id"
@@ -30,6 +31,9 @@ type server struct {
 	store                                                             *store.Store
 	vault                                                             *vault.Vault
 	publicURL, releaseBase, bootstrapSecret, adminUser, adminPassword string
+	authMu                                                            sync.RWMutex
+	sessions                                                          map[string]uint64
+	sessionEpoch                                                      uint64
 }
 
 type publicState struct {
@@ -48,6 +52,12 @@ type repositoryView struct {
 	BasePath  string    `json:"base_path"`
 	CreatedAt time.Time `json:"created_at"`
 }
+type repositoryUsageView struct {
+	ID      string `json:"id"`
+	Bytes   int64  `json:"bytes"`
+	Files   int    `json:"files"`
+	Checked string `json:"checked"`
+}
 
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
@@ -58,10 +68,17 @@ func (s *server) routes() http.Handler {
 	})
 	mux.Handle("GET /api/state", s.admin(http.HandlerFunc(s.handleState)))
 	mux.Handle("PATCH /api/nodes/{id}", s.admin(http.HandlerFunc(s.handleUpdateNode)))
+	mux.Handle("DELETE /api/nodes/{id}", s.admin(http.HandlerFunc(s.handleDeleteNode)))
 	mux.Handle("POST /api/repositories", s.admin(http.HandlerFunc(s.handleCreateRepository)))
+	mux.Handle("DELETE /api/repositories/{id}", s.admin(http.HandlerFunc(s.handleDeleteRepository)))
+	mux.Handle("GET /api/repositories/{id}/usage", s.admin(http.HandlerFunc(s.handleRepositoryUsage)))
 	mux.Handle("POST /api/tasks", s.admin(http.HandlerFunc(s.handleCreateTask)))
+	mux.Handle("DELETE /api/tasks/{id}", s.admin(http.HandlerFunc(s.handleDeleteTask)))
 	mux.Handle("POST /api/tasks/{id}/run", s.admin(http.HandlerFunc(s.handleRunTask)))
 	mux.Handle("POST /api/backups/{id}/restore", s.admin(http.HandlerFunc(s.handleRestore)))
+	mux.Handle("DELETE /api/backups/{id}", s.admin(http.HandlerFunc(s.handleDeleteBackup)))
+	mux.Handle("POST /api/admin/password", s.admin(http.HandlerFunc(s.handleChangePassword)))
+	mux.Handle("POST /api/admin/sessions/revoke", s.admin(http.HandlerFunc(s.handleRevokeSessions)))
 	mux.Handle("GET /install.sh", http.HandlerFunc(s.handleInstaller))
 	mux.Handle("POST /api/agent/register", http.HandlerFunc(s.handleRegister))
 	mux.Handle("POST /api/agent/{node}/heartbeat", http.HandlerFunc(s.handleHeartbeat))
@@ -72,11 +89,17 @@ func (s *server) routes() http.Handler {
 
 func (s *server) admin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		if !ok || subtle.ConstantTimeCompare([]byte(u), []byte(s.adminUser)) != 1 || subtle.ConstantTimeCompare([]byte(p), []byte(s.adminPassword)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="vBakup"`)
-			http.Error(w, "authentication required", http.StatusUnauthorized)
-			return
+		if !s.validSession(r) {
+			u, p, ok := r.BasicAuth()
+			s.authMu.RLock()
+			adminUser, adminPassword := s.adminUser, s.adminPassword
+			s.authMu.RUnlock()
+			if !ok || subtle.ConstantTimeCompare([]byte(u), []byte(adminUser)) != 1 || subtle.ConstantTimeCompare([]byte(p), []byte(adminPassword)) != 1 {
+				w.Header().Set("WWW-Authenticate", `Basic realm="vBakup"`)
+				http.Error(w, "authentication required", http.StatusUnauthorized)
+				return
+			}
+			s.issueSession(w)
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if origin := r.Header.Get("Origin"); origin != "" {
@@ -90,6 +113,25 @@ func (s *server) admin(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *server) validSession(r *http.Request) bool {
+	cookie, err := r.Cookie("vbakup_session")
+	if err != nil || cookie.Value == "" { return false }
+	s.authMu.RLock()
+	epoch, ok := s.sessions[cookie.Value]
+	valid := ok && epoch == s.sessionEpoch
+	s.authMu.RUnlock()
+	return valid
+}
+
+func (s *server) issueSession(w http.ResponseWriter) {
+	token := randomToken(32)
+	s.authMu.Lock()
+	if s.sessions == nil { s.sessions = map[string]uint64{} }
+	s.sessions[token] = s.sessionEpoch
+	s.authMu.Unlock()
+	http.SetCookie(w, &http.Cookie{Name: "vbakup_session", Value: token, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(s.publicURL, "https://"), SameSite: http.SameSiteStrictMode, MaxAge: 86400})
 }
 
 func (s *server) handleState(w http.ResponseWriter, _ *http.Request) {
@@ -145,6 +187,30 @@ func (s *server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, updated)
 }
 
+func (s *server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("id")
+	err := s.store.Update(func(state *model.State) error {
+		found := false
+		for _, node := range state.Nodes {
+			if node.ID == nodeID { found = true; break }
+		}
+		if !found { return errNotFound }
+		for _, task := range state.Tasks {
+			if task.NodeID == nodeID { return errors.New("节点仍被备份计划引用，请先删除计划") }
+		}
+		for _, op := range state.Operations {
+			if op.NodeID == nodeID && op.Status == "queued" { return errors.New("节点仍有恢复任务，请等待完成") }
+		}
+		for i := range state.Nodes {
+			if state.Nodes[i].ID == nodeID { state.Nodes = append(state.Nodes[:i], state.Nodes[i+1:]...); break }
+		}
+		return nil
+	})
+	if errors.Is(err, errNotFound) { writeError(w, http.StatusNotFound, "节点不存在"); return }
+	if err != nil { writeError(w, http.StatusConflict, err.Error()); return }
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 func (s *server) handleCreateRepository(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name     string `json:"name"`
@@ -178,6 +244,141 @@ func (s *server) handleCreateRepository(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusCreated, repositoryView{ID: repo.ID, Name: repo.Name, URL: repo.URL, Username: repo.Username, BasePath: repo.BasePath, CreatedAt: repo.CreatedAt})
+}
+
+func (s *server) handleDeleteRepository(w http.ResponseWriter, r *http.Request) {
+	repoID := r.PathValue("id")
+	err := s.store.Update(func(state *model.State) error {
+		found := false
+		for _, repo := range state.Repositories { if repo.ID == repoID { found = true; break } }
+		if !found { return errNotFound }
+		for _, task := range state.Tasks { if task.RepositoryID == repoID { return errors.New("备份空间仍被计划引用，请先删除计划") } }
+		for _, backup := range state.Backups { if backup.RepositoryID == repoID { return errors.New("备份空间仍有快照，请先删除快照") } }
+		for i := range state.Repositories {
+			if state.Repositories[i].ID == repoID { state.Repositories = append(state.Repositories[:i], state.Repositories[i+1:]...); break }
+		}
+		return nil
+	})
+	if errors.Is(err, errNotFound) { writeError(w, http.StatusNotFound, "备份空间不存在"); return }
+	if err != nil { writeError(w, http.StatusConflict, err.Error()); return }
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
+	taskID := r.PathValue("id")
+	err := s.store.Update(func(state *model.State) error {
+		for i := range state.Tasks {
+			if state.Tasks[i].ID == taskID {
+				for _, command := range state.Commands { if command.Task != nil && command.Task.ID == taskID { return errors.New("计划仍有任务排队") } }
+				state.Tasks = append(state.Tasks[:i], state.Tasks[i+1:]...)
+				return nil
+			}
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) { writeError(w, http.StatusNotFound, "备份计划不存在"); return }
+	if err != nil { writeError(w, http.StatusConflict, err.Error()); return }
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) handleRepositoryUsage(w http.ResponseWriter, r *http.Request) {
+	state := s.store.Snapshot()
+	var repo model.Repository
+	for _, candidate := range state.Repositories { if candidate.ID == r.PathValue("id") { repo = candidate; break } }
+	if repo.ID == "" { writeError(w, http.StatusNotFound, "备份空间不存在"); return }
+	password, err := s.vault.Decrypt(repo.PasswordEncrypted)
+	if err != nil { writeError(w, http.StatusInternalServerError, "无法读取备份空间凭据"); return }
+	dav, err := webdav.New(repo.URL, repo.Username, password)
+	if err != nil { writeError(w, http.StatusBadGateway, "WebDAV 地址无效"); return }
+	bytesUsed, files, err := dav.Usage()
+	if err != nil { writeError(w, http.StatusBadGateway, "无法读取 WebDAV 使用量: "+err.Error()); return }
+	writeJSON(w, http.StatusOK, repositoryUsageView{ID: repo.ID, Bytes: bytesUsed, Files: files, Checked: time.Now().UTC().Format(time.RFC3339)})
+}
+
+func (s *server) handleDeleteBackup(w http.ResponseWriter, r *http.Request) {
+	backupID := r.PathValue("id")
+	state := s.store.Snapshot()
+	var backup *model.Backup
+	for i := range state.Backups {
+		if state.Backups[i].ID == backupID {
+			copy := state.Backups[i]
+			backup = &copy
+			break
+		}
+	}
+	if backup == nil {
+		writeError(w, http.StatusNotFound, "备份不存在")
+		return
+	}
+	credentials, err := s.repositoryCredentials(backup.RepositoryID)
+	if err != nil {
+		writeError(w, http.StatusConflict, "备份空间不存在或凭据无法解密")
+		return
+	}
+	dav, err := webdav.New(credentials.URL, credentials.Username, credentials.Password)
+	if err != nil || dav.Delete(backup.RemotePath) != nil {
+		writeError(w, http.StatusBadGateway, "无法从 WebDAV 删除备份文件")
+		return
+	}
+	if err := s.store.Update(func(st *model.State) error {
+		for i := range st.Backups {
+			if st.Backups[i].ID == backupID {
+				st.Backups = append(st.Backups[:i], st.Backups[i+1:]...)
+				return nil
+			}
+		}
+		return errNotFound
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "备份记录删除失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if decodeJSON(r, &in) != nil || len([]rune(in.NewPassword)) < 16 {
+		writeError(w, http.StatusBadRequest, "新密码至少需要 16 个字符")
+		return
+	}
+	s.authMu.RLock()
+	current := s.adminPassword
+	s.authMu.RUnlock()
+	if subtle.ConstantTimeCompare([]byte(in.CurrentPassword), []byte(current)) != 1 {
+		writeError(w, http.StatusUnauthorized, "当前密码不正确")
+		return
+	}
+	encrypted, err := s.vault.Encrypt(in.NewPassword)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法保存新密码")
+		return
+	}
+	if err = s.store.Update(func(st *model.State) error {
+		st.Settings.AdminPasswordEncrypted = encrypted
+		st.Settings.AdminSessionEpoch++
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "无法保存新密码")
+		return
+	}
+	s.authMu.Lock()
+	s.adminPassword = in.NewPassword
+	s.sessions = map[string]uint64{}
+	s.sessionEpoch++
+	s.authMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) handleRevokeSessions(w http.ResponseWriter, _ *http.Request) {
+	s.authMu.Lock()
+	s.sessions = map[string]uint64{}
+	s.sessionEpoch++
+	s.authMu.Unlock()
+	_ = s.store.Update(func(st *model.State) error { st.Settings.AdminSessionEpoch++; return nil })
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *server) handleCreateTask(w http.ResponseWriter, r *http.Request) {

@@ -13,7 +13,9 @@ type State struct {
 }
 
 type Settings struct {
-	PublicURL string `json:"public_url"`
+	PublicURL             string `json:"public_url"`
+	AdminPasswordEncrypted string `json:"admin_password_encrypted,omitempty"`
+	AdminSessionEpoch     uint64 `json:"admin_session_epoch,omitempty"`
 }
 
 type Node struct {
@@ -90,6 +92,9 @@ type Backup struct {
 	Size         int64     `json:"size"`
 	SHA256       string    `json:"sha256"`
 	Services     []string  `json:"services,omitempty"`
+	Files        int64     `json:"files,omitempty"`
+	ArchiveBytes int64     `json:"archive_bytes,omitempty"`
+	Warnings     []string  `json:"warnings,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/J2026-dev/vbakup/internal/model"
 	"github.com/J2026-dev/vbakup/internal/store"
 	"github.com/J2026-dev/vbakup/internal/vault"
 )
@@ -33,12 +34,22 @@ func main() {
 		adminPassword = randomToken(24)
 		log.Printf("generated admin password: %s", adminPassword)
 	}
+	if encrypted := state.Snapshot().Settings.AdminPasswordEncrypted; encrypted != "" {
+		if storedPassword, decryptErr := secrets.Decrypt(encrypted); decryptErr == nil && storedPassword != "" {
+			adminPassword = storedPassword
+		}
+	}
+	if state.Snapshot().Settings.AdminPasswordEncrypted == "" {
+		if encrypted, encryptErr := secrets.Encrypt(adminPassword); encryptErr == nil {
+			_ = state.Update(func(st *model.State) error { st.Settings.AdminPasswordEncrypted = encrypted; return nil })
+		}
+	}
 
 	app := &server{
 		store: state, vault: secrets,
 		publicURL:       strings.TrimRight(env("VBAKUP_PUBLIC_URL", "http://localhost:8080"), "/"),
 		releaseBase:     strings.TrimRight(env("VBAKUP_RELEASE_BASE", "https://github.com/J2026-dev/vbakup/releases/latest/download"), "/"),
-		bootstrapSecret: bootstrap, adminUser: env("VBAKUP_ADMIN_USER", "admin"), adminPassword: adminPassword,
+		bootstrapSecret: bootstrap, adminUser: env("VBAKUP_ADMIN_USER", "admin"), adminPassword: adminPassword, sessions: map[string]uint64{}, sessionEpoch: state.Snapshot().Settings.AdminSessionEpoch,
 	}
 	go app.runScheduler(time.Minute)
 	addr := env("VBAKUP_LISTEN", ":8080")
