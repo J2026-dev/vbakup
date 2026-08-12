@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -17,6 +18,7 @@ type Discovery struct {
 	Services         []Service `json:"services"`
 	Paths            []string  `json:"paths"`
 	DockerContainers []string  `json:"docker_containers,omitempty"`
+	ComposeProjects  []string  `json:"compose_projects,omitempty"`
 }
 
 func Discover() Discovery {
@@ -52,6 +54,7 @@ func Discover() Discovery {
 		}
 	}
 	containers := commandLines("docker", "ps", "-a", "--format", "{{.Names}}")
+	composeProjects := uniqueAbsoluteLines(commandLines("docker", "ps", "-a", "--format", "{{.Label \"com.docker.compose.project.working_dir\"}}"))
 	if len(containers) > 0 && !containsService(services, "Docker") {
 		services = append(services, Service{Name: "Docker", Kind: "container", Paths: []string{"/var/lib/docker/volumes"}})
 		pathSet["/var/lib/docker/volumes"] = true
@@ -62,7 +65,7 @@ func Discover() Discovery {
 	}
 	sort.Strings(paths)
 	sort.Slice(services, func(i, j int) bool { return services[i].Name < services[j].Name })
-	return Discovery{Services: services, Paths: paths, DockerContainers: containers}
+	return Discovery{Services: services, Paths: paths, DockerContainers: containers, ComposeProjects: composeProjects}
 }
 
 func containsService(services []Service, name string) bool {
@@ -85,6 +88,19 @@ func commandLines(name string, args ...string) []string {
 		}
 	}
 	return lines
+}
+func uniqueAbsoluteLines(lines []string) []string {
+	seen := map[string]bool{}
+	var result []string
+	for _, line := range lines {
+		line = filepath.Clean(line)
+		if filepath.IsAbs(line) && !seen[line] {
+			seen[line] = true
+			result = append(result, line)
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 func ServiceNames(discovery Discovery) []string {
 	out := make([]string, 0, len(discovery.Services))

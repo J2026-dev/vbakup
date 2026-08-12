@@ -97,7 +97,16 @@ func addTree(tw *tar.Writer, root, stage string, manifest *Manifest) error {
 		if info.Mode()&os.ModeSocket != 0 {
 			return nil
 		}
-		header, err := tar.FileInfoHeader(info, "")
+		linkTarget := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			var linkErr error
+			linkTarget, linkErr = os.Readlink(current)
+			if linkErr != nil {
+				manifest.Warnings = append(manifest.Warnings, current+": "+linkErr.Error())
+				return nil
+			}
+		}
+		header, err := tar.FileInfoHeader(info, linkTarget)
 		if err != nil {
 			return nil
 		}
@@ -140,10 +149,12 @@ func ExtractArchive(source, destination string) error {
 		return err
 	}
 	tr := tar.NewReader(gz)
+	type pendingSymlink struct{ path, target string }
+	var symlinks []pendingSymlink
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
-			return nil
+			break
 		}
 		if err != nil {
 			return err
@@ -175,8 +186,25 @@ func ExtractArchive(source, destination string) error {
 			if closeErr != nil {
 				return closeErr
 			}
+		case tar.TypeSymlink:
+			symlinks = append(symlinks, pendingSymlink{path: absolute, target: header.Linkname})
 		}
 	}
+	for _, link := range symlinks {
+		if err = os.MkdirAll(filepath.Dir(link.path), 0750); err != nil {
+			return err
+		}
+		if _, err = os.Lstat(link.path); err == nil {
+			return fmt.Errorf("symlink path already exists %q", link.path)
+		}
+		if !os.IsNotExist(err) {
+			return err
+		}
+		if err = os.Symlink(link.target, link.path); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ReadManifest(extractedRoot string) (Manifest, error) {
@@ -236,26 +264,19 @@ func dumpDatabases(stage string, warnings []string) ([]string, []string) {
 	return dumps, warnings
 }
 func captureDockerCompose(stage string, manifest *Manifest) {
-	out, err := exec.Command("docker", "ps", "-a", "--format", "{{.Label \"com.docker.compose.project.working_dir\"}}").Output()
-	if err != nil {
-		return
-	}
-	seen := map[string]bool{}
-	for _, dir := range strings.Split(string(out), "\n") {
-		dir = strings.TrimSpace(dir)
-		if dir == "" || seen[dir] {
-			continue
-		}
-		seen[dir] = true
+	for _, dir := range manifest.Discovery.ComposeProjects {
 		for _, name := range []string{"compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml", ".env"} {
 			source := filepath.Join(dir, name)
 			if b, err := os.ReadFile(source); err == nil {
-				safe := strings.Trim(strings.ReplaceAll(filepath.ToSlash(dir), "/", "_"), "_")
+				safe := composeMetadataName(dir)
 				_ = os.MkdirAll(filepath.Join(stage, "compose", safe), 0700)
 				_ = os.WriteFile(filepath.Join(stage, "compose", safe, name), b, 0600)
 			}
 		}
 	}
+}
+func composeMetadataName(directory string) string {
+	return strings.Trim(strings.ReplaceAll(filepath.ToSlash(filepath.Clean(directory)), "/", "_"), "_")
 }
 func cleanAbsolutePaths(paths []string) []string {
 	seen := map[string]bool{}

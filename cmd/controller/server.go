@@ -32,11 +32,12 @@ type server struct {
 }
 
 type publicState struct {
-	Nodes          []model.Node     `json:"nodes"`
-	Repositories   []repositoryView `json:"repositories"`
-	Tasks          []model.Task     `json:"tasks"`
-	Backups        []model.Backup   `json:"backups"`
-	InstallCommand string           `json:"install_command"`
+	Nodes          []model.Node      `json:"nodes"`
+	Repositories   []repositoryView  `json:"repositories"`
+	Tasks          []model.Task      `json:"tasks"`
+	Backups        []model.Backup    `json:"backups"`
+	Operations     []model.Operation `json:"operations"`
+	InstallCommand string            `json:"install_command"`
 }
 type repositoryView struct {
 	ID        string    `json:"id"`
@@ -99,7 +100,7 @@ func (s *server) handleState(w http.ResponseWriter, _ *http.Request) {
 		repos = append(repos, repositoryView{ID: r.ID, Name: r.Name, URL: r.URL, Username: r.Username, BasePath: r.BasePath, CreatedAt: r.CreatedAt})
 	}
 	command := fmt.Sprintf("curl -fsSL %s/install.sh | sudo sh -s -- --controller %s --secret %s", s.publicURL, s.publicURL, s.bootstrapSecret)
-	writeJSON(w, http.StatusOK, publicState{Nodes: state.Nodes, Repositories: repos, Tasks: state.Tasks, Backups: state.Backups, InstallCommand: command})
+	writeJSON(w, http.StatusOK, publicState{Nodes: state.Nodes, Repositories: repos, Tasks: state.Tasks, Backups: state.Backups, Operations: state.Operations, InstallCommand: command})
 }
 
 func (s *server) handleCreateRepository(w http.ResponseWriter, r *http.Request) {
@@ -196,13 +197,13 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "目标节点不存在")
 		return
 	}
-	repo, err := s.repositoryCredentials(backup.RepositoryID)
-	if err != nil {
-		writeError(w, 500, "无法读取备份库凭据")
-		return
-	}
-	command := model.Command{ID: id.New("cmd"), NodeID: in.NodeID, Type: "restore", Payload: map[string]any{"repository": repo, "backup": backup, "confirm": true}, CreatedAt: time.Now().UTC()}
-	if err = s.store.Update(func(st *model.State) error { st.Commands = append(st.Commands, command); return nil }); err != nil {
+	operation := model.Operation{ID: id.New("op"), Type: "restore", NodeID: in.NodeID, BackupID: backup.ID, Status: "queued", CreatedAt: time.Now().UTC()}
+	command := model.Command{ID: id.New("cmd"), NodeID: in.NodeID, Type: "restore", Payload: map[string]any{"repository_id": backup.RepositoryID, "backup": backup, "confirm": true, "operation_id": operation.ID}, CreatedAt: time.Now().UTC()}
+	if err := s.store.Update(func(st *model.State) error {
+		st.Commands = append(st.Commands, command)
+		st.Operations = append([]model.Operation{operation}, st.Operations...)
+		return nil
+	}); err != nil {
 		writeError(w, 500, "无法下发恢复任务")
 		return
 	}
@@ -295,13 +296,53 @@ func (s *server) handleCommands(w http.ResponseWriter, r *http.Request) {
 			c := &st.Commands[i]
 			if c.NodeID == node.ID && (c.ClaimedAt.IsZero() || now.Sub(c.ClaimedAt) > 30*time.Minute) {
 				c.ClaimedAt = now
-				commands = append(commands, *c)
+				copy, err := cloneCommand(*c)
+				if err != nil {
+					return err
+				}
+				commands = append(commands, copy)
 				break
 			}
 		}
 		return nil
 	})
+	for i := range commands {
+		if err := s.injectRepositoryCredentials(&commands[i]); err != nil {
+			writeError(w, http.StatusInternalServerError, "无法读取备份库凭据")
+			return
+		}
+	}
 	writeJSON(w, 200, map[string]any{"commands": commands})
+}
+
+func cloneCommand(command model.Command) (model.Command, error) {
+	b, err := json.Marshal(command)
+	if err != nil {
+		return model.Command{}, err
+	}
+	var copy model.Command
+	err = json.Unmarshal(b, &copy)
+	return copy, err
+}
+
+func (s *server) injectRepositoryCredentials(command *model.Command) error {
+	if command.Payload == nil {
+		return errors.New("命令缺少备份库")
+	}
+	repositoryID, _ := command.Payload["repository_id"].(string)
+	if repositoryID == "" && command.Task != nil {
+		repositoryID = command.Task.RepositoryID
+	}
+	if repositoryID == "" {
+		return errors.New("命令缺少备份库")
+	}
+	credentials, err := s.repositoryCredentials(repositoryID)
+	if err != nil {
+		return err
+	}
+	command.Payload["repository"] = credentials
+	delete(command.Payload, "repository_id")
+	return nil
 }
 
 func (s *server) handleCommandResult(w http.ResponseWriter, r *http.Request) {
@@ -333,10 +374,21 @@ func (s *server) handleCommandResult(w http.ResponseWriter, r *http.Request) {
 			for i := range st.Tasks {
 				if st.Tasks[i].ID == command.Task.ID {
 					st.Tasks[i].LastStatus = result.Status
+					st.Tasks[i].LastMessage = result.Message
 				}
 			}
 		}
-		if result.Backup != nil && result.Status == "success" {
+		if operationID, _ := command.Payload["operation_id"].(string); operationID != "" {
+			for i := range st.Operations {
+				if st.Operations[i].ID == operationID {
+					st.Operations[i].Status = result.Status
+					st.Operations[i].Message = result.Message
+					st.Operations[i].Details = result.Details
+					st.Operations[i].CompletedAt = time.Now().UTC()
+				}
+			}
+		}
+		if result.Backup != nil && result.Status == "success" && command.Type == "backup" && command.Task != nil {
 			result.Backup.ID = id.New("backup")
 			result.Backup.TaskID = command.Task.ID
 			result.Backup.NodeID = node.ID

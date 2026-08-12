@@ -29,8 +29,9 @@ type config struct {
 	Token      string `json:"token"`
 }
 type app struct {
-	config config
-	client *http.Client
+	config      config
+	client      *http.Client
+	resultsPath string
 }
 
 func main() {
@@ -43,7 +44,7 @@ func main() {
 	if err = json.Unmarshal(data, &cfg); err != nil || cfg.Controller == "" || cfg.NodeID == "" || cfg.Token == "" {
 		log.Fatal("invalid agent config")
 	}
-	runner := &app{config: cfg, client: &http.Client{Transport: &http.Transport{
+	runner := &app{config: cfg, resultsPath: env("VBAKUP_RESULTS", "/var/lib/vbakup/results.json"), client: &http.Client{Transport: &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 90 * time.Second,
@@ -78,12 +79,60 @@ func (a *app) cycle() error {
 		return err
 	}
 	for _, command := range response.Commands {
-		result := a.execute(command)
+		results, err := loadResults(a.resultsPath)
+		if err != nil {
+			log.Printf("load command results: %v", err)
+			continue
+		}
+		result, exists := results[command.ID]
+		if !exists {
+			result = a.execute(command)
+			results[command.ID] = result
+			if err = saveResults(a.resultsPath, results); err != nil {
+				log.Printf("save command %s result: %v", command.ID, err)
+				continue
+			}
+		}
 		if err := a.post("/api/agent/"+a.config.NodeID+"/commands/"+command.ID+"/result", result, nil); err != nil {
 			log.Printf("report command %s: %v", command.ID, err)
+			continue
+		}
+		delete(results, command.ID)
+		if err = saveResults(a.resultsPath, results); err != nil {
+			log.Printf("remove reported command %s result: %v", command.ID, err)
 		}
 	}
 	return nil
+}
+
+func loadResults(path string) (map[string]model.CommandResult, error) {
+	results := map[string]model.CommandResult{}
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return results, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err = json.Unmarshal(b, &results); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func saveResults(path string, results map[string]model.CommandResult) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	b, err := json.Marshal(results)
+	if err != nil {
+		return err
+	}
+	temporary := path + ".tmp"
+	if err = os.WriteFile(temporary, b, 0600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
 }
 
 func (a *app) execute(command model.Command) model.CommandResult {
@@ -196,10 +245,11 @@ func (a *app) restore(command model.Command) model.CommandResult {
 	if err != nil {
 		return failure("manifest validation failed: " + err.Error())
 	}
+	warnings := agentlib.StopServices(manifest)
 	if err = copyRestoreTree(stage, "/"); err != nil {
 		return failure("file restore failed: " + err.Error())
 	}
-	warnings := agentlib.RestoreServices("/", manifest)
+	warnings = append(warnings, agentlib.RestoreServices(stage, "/", manifest)...)
 	return model.CommandResult{Status: "success", Message: fmt.Sprintf("restore completed with %d warning(s)", len(warnings)), Details: map[string]any{"warnings": warnings}}
 }
 
@@ -266,6 +316,14 @@ func copyRestoreTree(source, destination string) error {
 		if info.IsDir() {
 			return os.MkdirAll(target, info.Mode())
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err := os.Readlink(current)
+			if err != nil {
+				return err
+			}
+			_ = os.Remove(target)
+			return os.Symlink(link, target)
+		}
 		if !info.Mode().IsRegular() {
 			return nil
 		}
@@ -273,18 +331,23 @@ func copyRestoreTree(source, destination string) error {
 		if err != nil {
 			return err
 		}
-		defer in.Close()
 		if err = os.MkdirAll(filepath.Dir(target), 0750); err != nil {
+			_ = in.Close()
 			return err
 		}
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
 		if err != nil {
+			_ = in.Close()
 			return err
 		}
 		_, copyErr := io.Copy(out, in)
+		inputCloseErr := in.Close()
 		closeErr := out.Close()
 		if copyErr != nil {
 			return copyErr
+		}
+		if inputCloseErr != nil {
+			return inputCloseErr
 		}
 		return closeErr
 	})

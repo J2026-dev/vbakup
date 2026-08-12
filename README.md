@@ -11,7 +11,7 @@
 - 一个主控管理所有 VPS，提供节点、WebDAV、计划、备份和恢复视图。
 - 一条命令安装 agent，注册后由 systemd 常驻，无需后续手工配对。
 - 自动识别 1Panel、Docker、Xray、Komari Agent、Cloudreve、MySQL、PostgreSQL、Redis、Nginx 及常用数据目录。
-- 数据库优先执行逻辑一致性导出；Docker 保存 inspect、Compose 和 `.env` 元数据。
+- 数据库优先执行逻辑一致性导出；Docker 保存 inspect、Compose、原工作目录和 `.env` 元数据。
 - 支持每小时、每 6 小时、每 12 小时、每天、每周以及 API 自定义 Go duration（最短 15 分钟）。
 - 备份上传前记录 SHA-256；恢复下载后强制复验，归档解包防路径穿越。
 - 原 VPS 损坏后，在新 VPS 执行相同安装命令，再从控制台选择备份和新节点恢复。
@@ -116,7 +116,8 @@ curl -fsSL https://backup.example.com/install.sh | sudo sh -s -- \
 3. 等待新节点在线，在“灾难恢复”选择目标备份并点击“恢复”。
 4. 选择新节点，确认覆盖后下发任务。
 5. agent 下载归档、验证 SHA-256、恢复文件和数据库 dump，并尝试重启已识别的 systemd 服务。
-6. 检查应用域名、IP 绑定、证书、数据库账号、Docker 网络以及恢复结果中的警告。
+6. agent 会把 Compose 元数据恢复到原工作目录，并执行 `docker compose up -d`。
+7. 在控制台检查恢复任务结果，以及应用域名、IP 绑定、证书、数据库账号、Docker 网络等警告。
 
 恢复不会自动修改 DNS，也无法可靠重建云厂商安全组、外部密钥、未备份的远端依赖或硬编码旧 IP。完整灾备必须把这些项目纳入演练清单。
 

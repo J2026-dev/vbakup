@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/J2026-dev/vbakup/internal/id"
@@ -61,13 +60,13 @@ func (s *server) queueBackup(taskID string, force bool) (model.Command, error) {
 			return model.Command{}, errors.New("任务尚未到执行时间")
 		}
 	}
-	repo, err := s.repositoryCredentials(task.RepositoryID)
+	command := model.Command{ID: id.New("cmd"), NodeID: task.NodeID, Type: "backup", Task: task, Payload: map[string]any{"repository_id": task.RepositoryID}, CreatedAt: time.Now().UTC()}
+	queuedCommand, err := cloneCommand(command)
 	if err != nil {
-		return model.Command{}, fmt.Errorf("读取备份库失败: %w", err)
+		return model.Command{}, err
 	}
-	command := model.Command{ID: id.New("cmd"), NodeID: task.NodeID, Type: "backup", Task: task, Payload: map[string]any{"repository": repo}, CreatedAt: time.Now().UTC()}
 	err = s.store.Update(func(st *model.State) error {
-		st.Commands = append(st.Commands, command)
+		st.Commands = append(st.Commands, queuedCommand)
 		for i := range st.Tasks {
 			if st.Tasks[i].ID == taskID {
 				st.Tasks[i].LastRun = command.CreatedAt

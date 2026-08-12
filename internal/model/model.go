@@ -8,6 +8,7 @@ type State struct {
 	Tasks        []Task       `json:"tasks"`
 	Commands     []Command    `json:"commands"`
 	Backups      []Backup     `json:"backups"`
+	Operations   []Operation  `json:"operations"`
 	Settings     Settings     `json:"settings"`
 }
 
@@ -57,6 +58,7 @@ type Task struct {
 	Enabled          bool      `json:"enabled"`
 	LastRun          time.Time `json:"last_run,omitempty"`
 	LastStatus       string    `json:"last_status,omitempty"`
+	LastMessage      string    `json:"last_message,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 
@@ -87,4 +89,16 @@ type Backup struct {
 	SHA256       string    `json:"sha256"`
 	Services     []string  `json:"services,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+type Operation struct {
+	ID          string         `json:"id"`
+	Type        string         `json:"type"`
+	NodeID      string         `json:"node_id"`
+	BackupID    string         `json:"backup_id,omitempty"`
+	Status      string         `json:"status"`
+	Message     string         `json:"message,omitempty"`
+	Details     map[string]any `json:"details,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	CompletedAt time.Time      `json:"completed_at,omitempty"`
 }
