@@ -1,0 +1,45 @@
+services:
+  controller:
+    image: ghcr.io/j2026-dev/vbakup:latest
+    restart: unless-stopped
+    environment:
+      VBAKUP_DATA: /data
+      VBAKUP_LISTEN: :8080
+      VBAKUP_PUBLIC_URL: ${VBAKUP_PUBLIC_URL:?set VBAKUP_PUBLIC_URL}
+      VBAKUP_ADMIN_USER: ${VBAKUP_ADMIN_USER:-admin}
+      VBAKUP_ADMIN_PASSWORD: ${VBAKUP_ADMIN_PASSWORD:?set VBAKUP_ADMIN_PASSWORD}
+      VBAKUP_BOOTSTRAP_SECRET: ${VBAKUP_BOOTSTRAP_SECRET:?set VBAKUP_BOOTSTRAP_SECRET}
+      VBAKUP_RELEASE_BASE: ${VBAKUP_RELEASE_BASE:-https://github.com/J2026-dev/vbakup/releases/latest/download}
+    volumes:
+      - ./data:/data
+    networks: [vbakup]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      controller:
+        condition: service_healthy
+    environment:
+      VBAKUP_DOMAIN: ${VBAKUP_DOMAIN:?set VBAKUP_DOMAIN}
+    command: ["caddy", "reverse-proxy", "--from", "${VBAKUP_DOMAIN}", "--to", "controller:8080"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [vbakup]
+
+networks:
+  vbakup:
+
+volumes:
+  caddy_data:
+  caddy_config:

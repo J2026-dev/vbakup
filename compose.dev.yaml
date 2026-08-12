@@ -1,0 +1,4 @@
+services:
+  controller:
+    build: .
+    image: vbakup:dev

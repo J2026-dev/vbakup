@@ -1,0 +1,7 @@
+data/
+bin/
+*.log
+.env
+.verify-*
+.verify-gocache/
+.verify-gomodcache/

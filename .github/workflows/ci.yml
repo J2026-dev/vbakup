@@ -1,0 +1,29 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go build ./cmd/controller ./cmd/agent
+      - name: Validate Linux scripts
+        run: |
+          sh -n scripts/install-controller.sh
+          sh -n cmd/controller/assets/install-agent.sh
+      - name: Validate Compose
+        env:
+          VBAKUP_DOMAIN: backup.example.com
+          VBAKUP_PUBLIC_URL: https://backup.example.com
+          VBAKUP_ADMIN_PASSWORD: test-admin-password
+          VBAKUP_BOOTSTRAP_SECRET: test-bootstrap-secret
+        run: docker compose config --quiet
