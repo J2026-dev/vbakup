@@ -168,14 +168,20 @@ go run ./cmd/controller
 
 环境变量见 `.env.example`。控制台和安装脚本嵌入 controller 二进制，无额外前端构建步骤。
 
-创建首个 GitHub Release：
+创建 GitHub Release（推荐，无需在本地创建标签）：
+
+1. 打开仓库的 `Actions` 页面并选择 `Release`。
+2. 点击 `Run workflow`，输入版本号（例如 `v0.1.0`）后确认。
+3. 等待所有任务变为绿色；工作流会自动创建标签、Release、Linux agent 附件和多架构主控镜像。
+
+也可以从终端推送一个以 `v` 开头的新标签：
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-等待仓库的 Release workflow 全部通过后，再运行主控和 agent 一键安装命令。
+版本号必须采用 `v0.1.0` 这种格式；`0.0.1` 这类不带 `v` 的标签不会触发发布。等待 Release workflow 全部通过后，再运行主控和 agent 一键安装命令。
 
 ## 项目结构
 
