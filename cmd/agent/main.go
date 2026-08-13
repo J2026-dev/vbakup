@@ -184,11 +184,15 @@ func (a *app) backup(command model.Command) model.CommandResult {
 	if err != nil {
 		return failure(err.Error())
 	}
-	if err = dav.Put(remote, file); err != nil {
+	if err = dav.PutSized(remote, file, size); err != nil {
 		return failure(err.Error())
 	}
-	// Read the object back immediately. This catches WebDAV gateways that
-	// acknowledge PUT before the complete object is committed.
+	// Object-storage-backed WebDAV servers can acknowledge PUT before the
+	// completed object becomes visible. Wait for the expected size instead of
+	// treating the first zero-byte HEAD/GET as permanent corruption.
+	if err = waitForRemoteSize(dav, remote, size); err != nil {
+		return failure("backup upload did not become readable: " + err.Error())
+	}
 	check, err := dav.Get(remote)
 	if err != nil {
 		return failure("backup upload verification failed: " + err.Error())
@@ -198,7 +202,9 @@ func (a *app) backup(command model.Command) model.CommandResult {
 	if createErr == nil {
 		_, createErr = io.Copy(verifyFile, check)
 		closeErr := verifyFile.Close()
-		if createErr == nil { createErr = closeErr }
+		if createErr == nil {
+			createErr = closeErr
+		}
 	}
 	_ = check.Close()
 	defer os.Remove(verifiedArchive)
@@ -214,6 +220,30 @@ func (a *app) backup(command model.Command) model.CommandResult {
 		message = fmt.Sprintf("backup uploaded with %d warning(s)", len(manifest.Warnings))
 	}
 	return model.CommandResult{Status: "success", Message: message, Details: map[string]any{"discovered_paths": manifest.Paths, "discovered_services": agentlib.ServiceNames(manifest.Discovery), "files": manifest.Files, "bytes": manifest.Bytes, "warnings": manifest.Warnings}, Backup: &model.Backup{RepositoryID: command.Task.RepositoryID, RemotePath: remote, Size: size, SHA256: hash, Services: agentlib.ServiceNames(manifest.Discovery), Files: manifest.Files, ArchiveBytes: manifest.Bytes, Warnings: manifest.Warnings}}
+}
+
+func waitForRemoteSize(dav *webdav.Client, remote string, expected int64) error {
+	deadline := time.Now().Add(5 * time.Minute)
+	var actual int64
+	var lastErr error
+	for attempt := 0; time.Now().Before(deadline); attempt++ {
+		actual, lastErr = dav.Size(remote)
+		if lastErr == nil && actual == expected {
+			return nil
+		}
+		if lastErr == nil && actual > expected {
+			return fmt.Errorf("remote object is larger than expected: expected=%d actual=%d", expected, actual)
+		}
+		delay := time.Duration(2+attempt*2) * time.Second
+		if delay > 20*time.Second {
+			delay = 20 * time.Second
+		}
+		time.Sleep(delay)
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return fmt.Errorf("remote size did not stabilize: expected=%d actual=%d", expected, actual)
 }
 
 func safeRemoteKeyword(value string) string {

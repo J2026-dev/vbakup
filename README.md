@@ -19,6 +19,7 @@
 - 原 VPS 损坏后，在新 VPS 执行相同安装命令，再从控制台选择备份和新节点恢复。
 - WebDAV 密码由主控本地 AES-GCM 主密钥加密；agent token 仅保存 SHA-256 哈希。
 - 被控只发起 `443/tcp` 出站请求，可置于 NAT、防火墙或 Cloudflare 代理之后。
+- 主控页面每 10 秒静默同步节点、策略和快照状态，切回页面时也会立即刷新，无需手动重新加载。
 
 ## 架构
 
@@ -73,6 +74,8 @@ curl -fsSL https://raw.githubusercontent.com/J2026-dev/vbakup/main/scripts/insta
 
 接着在面板添加 WebDAV、创建备份计划，即可开始备份。
 
+主控 VPS 也可以安装 agent 并作为被控节点。agent 运行在宿主机 systemd 中；备份 Docker 时会短暂停止包括主控在内的运行容器，直接把归档上传到 WebDAV，随后恢复原先运行的容器并向主控上报结果。备份窗口内控制台短暂不可访问属于预期行为。
+
 ## 手动部署主控
 
 需要自定义网络或已有反向代理时：
@@ -103,6 +106,7 @@ curl -fsSL https://backup.example.com/install.sh | sudo sh -s -- \
 ```
 
 之后不需要打开端口或继续配置。约 30 秒内节点会出现在控制台。
+重复执行同一安装命令会更新 agent 二进制并保留现有节点身份，不会在控制台创建重复节点。
 
 ## 创建备份
 

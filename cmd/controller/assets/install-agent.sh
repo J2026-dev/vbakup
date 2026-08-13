@@ -29,12 +29,18 @@ curl -fL "__RELEASE_BASE__/vbakup-agent-linux-$ARCH" -o "$TMP_DIR/vbakup-agent"
 curl -fL "__RELEASE_BASE__/vbakup-agent-linux-$ARCH.sha256" -o "$TMP_DIR/vbakup-agent.sha256"
 (cd "$TMP_DIR" && sed "s#vbakup-agent-linux-$ARCH#vbakup-agent#" vbakup-agent.sha256 | sha256sum -c -)
 install -m 0755 "$TMP_DIR/vbakup-agent" /usr/local/bin/vbakup-agent
-HOST=$(hostname | tr -cd 'A-Za-z0-9._-')
-RESPONSE=$(curl -fsS -X POST "$CONTROLLER/api/agent/register" -H 'Content-Type: application/json' --data "{\"name\":\"$HOST\",\"secret\":\"$SECRET\",\"os\":\"linux\",\"architecture\":\"$ARCH\",\"agent_version\":\"0.1.0\"}")
-NODE_ID=$(printf '%s' "$RESPONSE" | sed -n 's/.*"node_id":"\([^"]*\)".*/\1/p')
-TOKEN=$(printf '%s' "$RESPONSE" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-[ -n "$NODE_ID" ] && [ -n "$TOKEN" ] || { echo "Registration failed: $RESPONSE" >&2; exit 1; }
-printf '{"controller":"%s","node_id":"%s","token":"%s"}\n' "$CONTROLLER" "$NODE_ID" "$TOKEN" > /etc/vbakup/agent.json
+if [ -s /etc/vbakup/agent.json ]; then
+  NODE_ID=$(sed -n 's/.*"node_id":"\([^"]*\)".*/\1/p' /etc/vbakup/agent.json)
+  [ -n "$NODE_ID" ] || { echo "Existing agent configuration is invalid; move /etc/vbakup/agent.json aside and retry." >&2; exit 1; }
+  echo "Existing node configuration found; updating the agent without registering a duplicate node."
+else
+  HOST=$(hostname | tr -cd 'A-Za-z0-9._-')
+  RESPONSE=$(curl -fsS -X POST "$CONTROLLER/api/agent/register" -H 'Content-Type: application/json' --data "{\"name\":\"$HOST\",\"secret\":\"$SECRET\",\"os\":\"linux\",\"architecture\":\"$ARCH\",\"agent_version\":\"0.1.0\"}")
+  NODE_ID=$(printf '%s' "$RESPONSE" | sed -n 's/.*"node_id":"\([^"]*\)".*/\1/p')
+  TOKEN=$(printf '%s' "$RESPONSE" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+  [ -n "$NODE_ID" ] && [ -n "$TOKEN" ] || { echo "Registration failed: $RESPONSE" >&2; exit 1; }
+  printf '{"controller":"%s","node_id":"%s","token":"%s"}\n' "$CONTROLLER" "$NODE_ID" "$TOKEN" > /etc/vbakup/agent.json
+fi
 chmod 0600 /etc/vbakup/agent.json
 if command -v systemctl >/dev/null 2>&1; then
   cat > /etc/systemd/system/vbakup-agent.service <<'UNIT'

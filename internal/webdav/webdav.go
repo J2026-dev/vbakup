@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -29,7 +30,7 @@ type davPropSet struct {
 	Prop davProps `xml:"prop"`
 }
 type davProps struct {
-	Length    string       `xml:"getcontentlength"`
+	Length     string    `xml:"getcontentlength"`
 	Collection *struct{} `xml:"resourcetype>collection"`
 }
 
@@ -39,7 +40,7 @@ func New(rawURL, username, password string) (*Client, error) {
 		return nil, fmt.Errorf("invalid WebDAV URL")
 	}
 	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}}
-	return &Client{base: strings.TrimRight(u.String(), "/"), user: username, password: password, client: &http.Client{Transport: transport, Timeout: 30 * time.Second}}, nil
+	return &Client{base: strings.TrimRight(u.String(), "/"), user: username, password: password, client: &http.Client{Transport: transport, Timeout: 30 * time.Minute}}, nil
 }
 
 func (c *Client) request(method, name string, body io.Reader) (*http.Response, error) {
@@ -47,6 +48,10 @@ func (c *Client) request(method, name string, body io.Reader) (*http.Response, e
 }
 
 func (c *Client) requestDepth(method, name string, body io.Reader, depth string) (*http.Response, error) {
+	return c.requestDepthSize(method, name, body, depth, -1)
+}
+
+func (c *Client) requestDepthSize(method, name string, body io.Reader, depth string, size int64) (*http.Response, error) {
 	clean := strings.TrimLeft(path.Clean("/"+name), "/")
 	req, err := http.NewRequest(method, c.base+"/"+clean, body)
 	if err != nil {
@@ -57,6 +62,9 @@ func (c *Client) requestDepth(method, name string, body io.Reader, depth string)
 	}
 	if method == http.MethodPut {
 		req.Header.Set("Content-Type", "application/octet-stream")
+		if size >= 0 {
+			req.ContentLength = size
+		}
 	}
 	if method == "PROPFIND" {
 		req.Header.Set("Content-Type", "application/xml; charset=utf-8")
@@ -84,10 +92,14 @@ func (c *Client) MkdirAll(directory string) error {
 	return nil
 }
 func (c *Client) Put(name string, body io.Reader) error {
+	return c.PutSized(name, body, -1)
+}
+
+func (c *Client) PutSized(name string, body io.Reader, size int64) error {
 	if err := c.MkdirAll(path.Dir(name)); err != nil {
 		return err
 	}
-	response, err := c.request(http.MethodPut, name, body)
+	response, err := c.requestDepthSize(http.MethodPut, name, body, "0", size)
 	if err != nil {
 		return err
 	}
@@ -96,6 +108,43 @@ func (c *Client) Put(name string, body io.Reader) error {
 		return fmt.Errorf("WebDAV PUT: %s", response.Status)
 	}
 	return nil
+}
+
+func (c *Client) Size(name string) (int64, error) {
+	response, err := c.request(http.MethodHead, name, nil)
+	if err == nil && response.StatusCode < 300 {
+		value := response.Header.Get("Content-Length")
+		_ = response.Body.Close()
+		if value != "" {
+			size, parseErr := strconv.ParseInt(value, 10, 64)
+			if parseErr == nil && size >= 0 {
+				return size, nil
+			}
+		}
+	} else if response != nil {
+		_ = response.Body.Close()
+	}
+	response, err = c.requestDepth("PROPFIND", name, bytes.NewReader([]byte(`<?xml version="1.0"?><propfind xmlns="DAV:"><prop><getcontentlength/></prop></propfind>`)), "0")
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode >= 300 {
+		return 0, fmt.Errorf("WebDAV PROPFIND: %s", response.Status)
+	}
+	var result davMultiStatus
+	if err = xml.NewDecoder(response.Body).Decode(&result); err != nil {
+		return 0, err
+	}
+	for _, item := range result.Responses {
+		for _, propstat := range item.Props {
+			size, parseErr := strconv.ParseInt(strings.TrimSpace(propstat.Prop.Length), 10, 64)
+			if parseErr == nil && size >= 0 {
+				return size, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("WebDAV PROPFIND: missing getcontentlength")
 }
 func (c *Client) Get(name string) (io.ReadCloser, error) {
 	response, err := c.request(http.MethodGet, name, nil)

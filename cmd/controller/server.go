@@ -117,7 +117,9 @@ func (s *server) admin(next http.Handler) http.Handler {
 
 func (s *server) validSession(r *http.Request) bool {
 	cookie, err := r.Cookie("vbakup_session")
-	if err != nil || cookie.Value == "" { return false }
+	if err != nil || cookie.Value == "" {
+		return false
+	}
 	s.authMu.RLock()
 	epoch, ok := s.sessions[cookie.Value]
 	valid := ok && epoch == s.sessionEpoch
@@ -128,7 +130,9 @@ func (s *server) validSession(r *http.Request) bool {
 func (s *server) issueSession(w http.ResponseWriter) {
 	token := randomToken(32)
 	s.authMu.Lock()
-	if s.sessions == nil { s.sessions = map[string]uint64{} }
+	if s.sessions == nil {
+		s.sessions = map[string]uint64{}
+	}
 	s.sessions[token] = s.sessionEpoch
 	s.authMu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: "vbakup_session", Value: token, Path: "/", HttpOnly: true, Secure: strings.HasPrefix(s.publicURL, "https://"), SameSite: http.SameSiteStrictMode, MaxAge: 86400})
@@ -138,6 +142,11 @@ func (s *server) handleState(w http.ResponseWriter, _ *http.Request) {
 	state := s.store.Snapshot()
 	for i := range state.Nodes {
 		state.Nodes[i].TokenHash = ""
+		if state.Nodes[i].LastSeen.IsZero() || time.Since(state.Nodes[i].LastSeen) > 90*time.Second {
+			state.Nodes[i].Status = "offline"
+		} else {
+			state.Nodes[i].Status = "online"
+		}
 	}
 	repos := make([]repositoryView, 0, len(state.Repositories))
 	for _, r := range state.Repositories {
@@ -192,22 +201,40 @@ func (s *server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	err := s.store.Update(func(state *model.State) error {
 		found := false
 		for _, node := range state.Nodes {
-			if node.ID == nodeID { found = true; break }
+			if node.ID == nodeID {
+				found = true
+				break
+			}
 		}
-		if !found { return errNotFound }
+		if !found {
+			return errNotFound
+		}
 		for _, task := range state.Tasks {
-			if task.NodeID == nodeID { return errors.New("节点仍被备份计划引用，请先删除计划") }
+			if task.NodeID == nodeID {
+				return errors.New("节点仍被备份计划引用，请先删除计划")
+			}
 		}
 		for _, op := range state.Operations {
-			if op.NodeID == nodeID && op.Status == "queued" { return errors.New("节点仍有恢复任务，请等待完成") }
+			if op.NodeID == nodeID && op.Status == "queued" {
+				return errors.New("节点仍有恢复任务，请等待完成")
+			}
 		}
 		for i := range state.Nodes {
-			if state.Nodes[i].ID == nodeID { state.Nodes = append(state.Nodes[:i], state.Nodes[i+1:]...); break }
+			if state.Nodes[i].ID == nodeID {
+				state.Nodes = append(state.Nodes[:i], state.Nodes[i+1:]...)
+				break
+			}
 		}
 		return nil
 	})
-	if errors.Is(err, errNotFound) { writeError(w, http.StatusNotFound, "节点不存在"); return }
-	if err != nil { writeError(w, http.StatusConflict, err.Error()); return }
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "节点不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -250,17 +277,41 @@ func (s *server) handleDeleteRepository(w http.ResponseWriter, r *http.Request) 
 	repoID := r.PathValue("id")
 	err := s.store.Update(func(state *model.State) error {
 		found := false
-		for _, repo := range state.Repositories { if repo.ID == repoID { found = true; break } }
-		if !found { return errNotFound }
-		for _, task := range state.Tasks { if task.RepositoryID == repoID { return errors.New("备份空间仍被计划引用，请先删除计划") } }
-		for _, backup := range state.Backups { if backup.RepositoryID == repoID { return errors.New("备份空间仍有快照，请先删除快照") } }
+		for _, repo := range state.Repositories {
+			if repo.ID == repoID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errNotFound
+		}
+		for _, task := range state.Tasks {
+			if task.RepositoryID == repoID {
+				return errors.New("备份空间仍被计划引用，请先删除计划")
+			}
+		}
+		for _, backup := range state.Backups {
+			if backup.RepositoryID == repoID {
+				return errors.New("备份空间仍有快照，请先删除快照")
+			}
+		}
 		for i := range state.Repositories {
-			if state.Repositories[i].ID == repoID { state.Repositories = append(state.Repositories[:i], state.Repositories[i+1:]...); break }
+			if state.Repositories[i].ID == repoID {
+				state.Repositories = append(state.Repositories[:i], state.Repositories[i+1:]...)
+				break
+			}
 		}
 		return nil
 	})
-	if errors.Is(err, errNotFound) { writeError(w, http.StatusNotFound, "备份空间不存在"); return }
-	if err != nil { writeError(w, http.StatusConflict, err.Error()); return }
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "备份空间不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
@@ -269,29 +320,56 @@ func (s *server) handleDeleteTask(w http.ResponseWriter, r *http.Request) {
 	err := s.store.Update(func(state *model.State) error {
 		for i := range state.Tasks {
 			if state.Tasks[i].ID == taskID {
-				for _, command := range state.Commands { if command.Task != nil && command.Task.ID == taskID { return errors.New("计划仍有任务排队") } }
+				for _, command := range state.Commands {
+					if command.Task != nil && command.Task.ID == taskID {
+						return errors.New("计划仍有任务排队")
+					}
+				}
 				state.Tasks = append(state.Tasks[:i], state.Tasks[i+1:]...)
 				return nil
 			}
 		}
 		return errNotFound
 	})
-	if errors.Is(err, errNotFound) { writeError(w, http.StatusNotFound, "备份计划不存在"); return }
-	if err != nil { writeError(w, http.StatusConflict, err.Error()); return }
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "备份计划不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *server) handleRepositoryUsage(w http.ResponseWriter, r *http.Request) {
 	state := s.store.Snapshot()
 	var repo model.Repository
-	for _, candidate := range state.Repositories { if candidate.ID == r.PathValue("id") { repo = candidate; break } }
-	if repo.ID == "" { writeError(w, http.StatusNotFound, "备份空间不存在"); return }
+	for _, candidate := range state.Repositories {
+		if candidate.ID == r.PathValue("id") {
+			repo = candidate
+			break
+		}
+	}
+	if repo.ID == "" {
+		writeError(w, http.StatusNotFound, "备份空间不存在")
+		return
+	}
 	password, err := s.vault.Decrypt(repo.PasswordEncrypted)
-	if err != nil { writeError(w, http.StatusInternalServerError, "无法读取备份空间凭据"); return }
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法读取备份空间凭据")
+		return
+	}
 	dav, err := webdav.New(repo.URL, repo.Username, password)
-	if err != nil { writeError(w, http.StatusBadGateway, "WebDAV 地址无效"); return }
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "WebDAV 地址无效")
+		return
+	}
 	bytesUsed, files, err := dav.Usage()
-	if err != nil { writeError(w, http.StatusBadGateway, "无法读取 WebDAV 使用量: "+err.Error()); return }
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "无法读取 WebDAV 使用量: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, repositoryUsageView{ID: repo.ID, Bytes: bytesUsed, Files: files, Checked: time.Now().UTC().Format(time.RFC3339)})
 }
 

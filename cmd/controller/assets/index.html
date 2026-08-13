@@ -7,54 +7,76 @@
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <header class="topbar">
-    <div><strong>vBakup</strong><span>灾备控制台</span></div>
-    <div><button id="show-admin" class="icon-button" title="管理员设置" aria-label="管理员设置">⚙</button><button id="refresh" class="icon-button" title="刷新" aria-label="刷新">↻</button></div>
-  </header>
-  <main>
-    <section class="summary" aria-label="状态概览">
-      <div><span>在线节点</span><strong id="online-count">0</strong></div>
-      <div><span>备份计划</span><strong id="task-count">0</strong></div>
-      <div><span>可用备份</span><strong id="backup-count">0</strong></div>
-      <div><span>备份空间</span><strong id="repo-count">0</strong></div>
-    </section>
-
-    <nav class="tabs" aria-label="主要视图">
-      <button class="active" data-view="nodes">节点</button>
-      <button data-view="tasks">备份计划</button>
-      <button data-view="backups">灾难恢复</button>
-      <button data-view="settings">备份空间</button>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-mark">V</span><strong>vBakup</strong></div>
+    <nav class="side-nav" aria-label="主要视图">
+      <button class="active" data-view="dashboard"><span>▦</span>仪表盘</button>
+      <button data-view="nodes"><span>▤</span>节点管理</button>
+      <button data-view="settings"><span>▱</span>存储配置</button>
+      <button data-view="tasks"><span>◇</span>备份策略</button>
+      <button data-view="history"><span>◴</span>任务历史</button>
+      <button data-view="backups"><span>▣</span>快照与恢复</button>
+      <button data-action="admin"><span>⚙</span>系统管理</button>
     </nav>
+    <div class="sidebar-foot">agent 仅需出站 HTTPS</div>
+  </aside>
 
-    <section id="nodes" class="view active">
-      <div class="section-heading"><div><h1>被控节点</h1><p>agent 仅通过 HTTPS 主动连接主控，无需开放入站端口。</p></div><button id="show-install" class="primary">＋ 添加节点</button></div>
-      <div id="node-list" class="table-wrap"></div>
-    </section>
+  <div class="shell">
+    <header class="topbar">
+      <div><span class="crumb">控制台</span><span class="crumb-arrow">›</span><strong id="page-title">仪表盘</strong></div>
+      <div class="top-actions"><span id="sync-state" class="sync-state">正在同步</span><span id="header-node-state"><i></i>0 / 0 节点在线</span><button id="refresh" class="icon-button" title="立即刷新" aria-label="立即刷新">↻</button><button id="show-admin" class="icon-button" title="系统管理" aria-label="系统管理">⚙</button></div>
+    </header>
 
-    <section id="tasks" class="view">
-      <div class="section-heading"><div><h1>备份计划</h1><p>自动发现服务，也可补充需要归档的绝对路径。</p></div><button id="show-task" class="primary">＋ 新建计划</button></div>
-      <div id="task-list" class="table-wrap"></div>
-    </section>
+    <main>
+      <section id="dashboard" class="view active">
+        <div class="metrics">
+          <article><div><span>系统状态</span><strong class="healthy">运行正常</strong><small>控制面已就绪</small></div><b class="healthy">⌁</b></article>
+          <article><div><span>节点状态</span><strong><em id="online-count">0</em> 在线</strong><small><span id="offline-count">0</span> 节点离线</small></div><b>▤</b></article>
+          <article><div><span>备份策略</span><strong><em id="task-count">0</em> 已配置</strong><small><span id="failed-task-count">0</span> 策略最近失败</small></div><b>◇</b></article>
+          <article><div><span>可用快照</span><strong><em id="backup-count">0</em></strong><small>已通过远端校验</small></div><b class="healthy">✓</b></article>
+          <article><div><span>存储配置</span><strong><em id="repo-count">0</em></strong><small>WebDAV 目标</small></div><b>▱</b></article>
+        </div>
+        <h2>快捷操作</h2>
+        <div class="quick-actions"><button id="dashboard-add-node" class="secondary">＋ 添加节点</button><button id="dashboard-add-repo" class="secondary">▱ 添加存储</button><button id="dashboard-add-task" class="secondary">◇ 创建策略</button></div>
+        <div class="section-heading compact"><h2>最近任务</h2><button class="secondary" data-view="history">查看全部</button></div>
+        <div id="recent-task-list" class="table-wrap"></div>
+      </section>
 
-    <section id="backups" class="view">
-      <div class="section-heading"><div><h1>灾难恢复</h1><p>备份已校验 SHA-256；恢复会覆盖目标节点的同路径文件并尝试重启服务。</p></div></div>
-      <div id="backup-list" class="table-wrap"></div>
-      <h2 class="subheading">最近恢复任务</h2>
-      <div id="operation-list" class="table-wrap"></div>
-    </section>
+      <section id="nodes" class="view">
+        <div class="section-heading"><div><h1>节点管理</h1><p>节点主动连接主控，无需开放任何入站端口。</p></div><button id="show-install" class="primary">＋ 添加节点</button></div>
+        <div id="node-list" class="table-wrap"></div>
+      </section>
 
-    <section id="settings" class="view">
-      <div class="section-heading"><div><h1>WebDAV 备份空间</h1><p>密码由主控本地密钥加密保存，仅在任务执行时下发给对应节点。</p></div><button id="show-repo" class="primary">＋ 添加空间</button></div>
-      <div id="repo-list" class="table-wrap"></div>
-    </section>
-  </main>
+      <section id="settings" class="view">
+        <div class="section-heading"><div><h1>存储配置</h1><p>WebDAV 凭据由主控本地加密，仅在任务执行时下发。</p></div><button id="show-repo" class="primary">＋ 添加存储</button></div>
+        <div id="repo-list" class="table-wrap"></div>
+      </section>
 
-  <dialog id="install-dialog"><form method="dialog"><header><h2>添加被控节点</h2><button class="close" aria-label="关闭">×</button></header><p>以 root 用户在 Linux VPS 执行：</p><pre id="install-command">正在生成安装命令…</pre><button id="copy-install" type="button" class="primary">复制命令</button></form></dialog>
+      <section id="tasks" class="view">
+        <div class="section-heading"><div><h1>备份策略</h1><p>自动发现服务，并按数据库导出、Docker 停机和文件归档方式备份。</p></div><button id="show-task" class="primary">＋ 创建策略</button></div>
+        <div id="task-list" class="table-wrap"></div>
+      </section>
+
+      <section id="history" class="view">
+        <div class="section-heading"><div><h1>任务历史</h1><p>查看备份和恢复任务的最近结果。</p></div></div>
+        <div id="history-list" class="table-wrap"></div>
+      </section>
+
+      <section id="backups" class="view">
+        <div class="section-heading"><div><h1>快照与恢复</h1><p>远端对象经过大小和 SHA-256 校验后才会登记为可用快照。</p></div></div>
+        <div id="backup-list" class="table-wrap"></div>
+        <h2 class="subheading">最近恢复任务</h2>
+        <div id="operation-list" class="table-wrap"></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="install-dialog"><form method="dialog"><header><h2>添加被控节点</h2><button class="close" aria-label="关闭">×</button></header><p>以 root 用户在 Linux VPS 执行：</p><pre id="install-command">正在生成安装命令...</pre><button id="copy-install" type="button" class="primary">复制命令</button></form></dialog>
   <dialog id="node-dialog"><form id="node-form"><header><h2>修改节点备注</h2><button type="button" class="close">×</button></header><input type="hidden" name="node_id"><label>备注<input name="note" maxlength="80" placeholder="例如：香港主站、数据库节点"></label><button class="primary">保存备注</button></form></dialog>
-  <dialog id="task-dialog"><form id="task-form"><header><h2>新建备份计划</h2><button type="button" class="close">×</button></header><label>名称<input name="name" required placeholder="每日灾备"></label><label>被控节点<select name="node_id" required></select></label><label>WebDAV 备份策略<select name="repository_id" required></select></label><label>频率<select name="schedule"><option value="@hourly">每小时</option><option value="@6hours">每 6 小时</option><option value="@12hours">每 12 小时</option><option value="@daily" selected>每天</option><option value="@weekly">每周</option></select></label><label>附加路径（每行一个）<textarea name="paths" rows="4" placeholder="/srv/my-service"></textarea></label><label class="check"><input name="include_docker" type="checkbox" checked> 保存 Docker 元数据与 Compose 文件</label><label class="check"><input name="include_databases" type="checkbox" checked> 尝试数据库一致性逻辑导出</label><button class="primary">创建计划</button></form></dialog>
-  <dialog id="repo-dialog"><form id="repo-form"><header><h2>添加 WebDAV 空间</h2><button type="button" class="close">×</button></header><label>名称<input name="name" required placeholder="异地灾备"></label><label>WebDAV 地址<input name="url" type="url" required placeholder="https://dav.example.com/remote.php/dav/files/user"></label><label>用户名<input name="username" autocomplete="username"></label><label>密码<input name="password" type="password" autocomplete="current-password"></label><label>基础目录<input name="base_path" placeholder="vbakup"></label><button class="primary">保存空间</button></form></dialog>
-  <dialog id="restore-dialog"><form id="restore-form"><header><h2>恢复到替代 VPS</h2><button type="button" class="close">×</button></header><input type="hidden" name="backup_id"><p class="danger-note">恢复会覆盖目标节点上的同路径文件。请先确认目标 VPS 为空机或已完成必要数据迁移。</p><label>目标节点<select name="node_id" required></select></label><label class="check"><input name="confirm" type="checkbox" required> 我确认覆盖目标节点并执行服务重建</label><button class="danger">下发恢复任务</button></form></dialog>
-  <dialog id="admin-dialog"><form id="admin-form"><header><h2>管理员安全设置</h2><button type="button" class="close">×</button></header><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label><label>新密码<input name="new_password" type="password" minlength="16" autocomplete="new-password" required></label><button class="primary" type="submit">修改密码并撤销会话</button><hr><button class="danger" id="revoke-sessions" type="button">撤销所有旧会话</button><hr><h3>主控 VPS 快捷检查命令</h3><pre>cd /opt/vbakup<br>docker compose ps<br>docker system df<br>docker compose logs --tail=100 controller</pre><p class="danger-note">删除节点、计划、快照和备份空间请在对应列表操作；仍被引用的对象会被拒绝删除。</p></form></dialog>
+  <dialog id="task-dialog"><form id="task-form"><header><h2>创建备份策略</h2><button type="button" class="close">×</button></header><label>名称<input name="name" required placeholder="每日灾备"></label><label>被控节点<select name="node_id" required></select></label><label>WebDAV 存储<select name="repository_id" required></select></label><label>频率<select name="schedule"><option value="@hourly">每小时</option><option value="@6hours">每 6 小时</option><option value="@12hours">每 12 小时</option><option value="@daily" selected>每天</option><option value="@weekly">每周</option></select></label><label>附加路径（每行一个）<textarea name="paths" rows="4" placeholder="/srv/my-service"></textarea></label><label class="check"><input name="include_docker" type="checkbox" checked> Docker 停机一致性归档与 Compose 元数据</label><label class="check"><input name="include_databases" type="checkbox" checked> 数据库逻辑导出</label><button class="primary">创建策略</button></form></dialog>
+  <dialog id="repo-dialog"><form id="repo-form"><header><h2>添加 WebDAV 存储</h2><button type="button" class="close">×</button></header><label>名称<input name="name" required placeholder="异地灾备"></label><label>WebDAV 地址<input name="url" type="url" required placeholder="https://dav.example.com/dav"></label><label>用户名<input name="username" autocomplete="username"></label><label>密码<input name="password" type="password" autocomplete="current-password"></label><label>基础目录<input name="base_path" placeholder="vbakup"></label><button class="primary">保存存储</button></form></dialog>
+  <dialog id="restore-dialog"><form id="restore-form"><header><h2>恢复到目标 VPS</h2><button type="button" class="close">×</button></header><input type="hidden" name="backup_id"><p class="danger-note">恢复会覆盖目标节点上的同路径文件，请优先使用空白 VPS 演练。</p><label>目标节点<select name="node_id" required></select></label><label class="check"><input name="confirm" type="checkbox" required> 我确认覆盖目标节点并执行服务重建</label><button class="danger">下发恢复任务</button></form></dialog>
+  <dialog id="admin-dialog"><form id="admin-form"><header><h2>系统管理</h2><button type="button" class="close">×</button></header><label>当前密码<input name="current_password" type="password" autocomplete="current-password" required></label><label>新密码<input name="new_password" type="password" minlength="16" autocomplete="new-password" required></label><button class="primary" type="submit">修改密码并撤销会话</button><hr><button class="danger" id="revoke-sessions" type="button">撤销所有旧会话</button><hr><h3>主控 VPS 快捷命令</h3><pre>vbakupctl status<br>vbakupctl logs<br>vbakupctl update</pre></form></dialog>
   <div id="toast" role="status"></div>
   <script src="/app.js" defer></script>
 </body>

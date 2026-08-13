@@ -68,12 +68,18 @@ func (s *server) queueBackup(taskID string, force bool) (model.Command, error) {
 		}
 	}
 	command := model.Command{ID: id.New("cmd"), NodeID: task.NodeID, Type: "backup", Task: task, Payload: map[string]any{"repository_id": task.RepositoryID, "node_name": nodeName}, CreatedAt: time.Now().UTC()}
+	operation := model.Operation{ID: id.New("op"), Type: "backup", NodeID: task.NodeID, Status: "queued", Message: task.Name, CreatedAt: command.CreatedAt}
+	command.Payload["operation_id"] = operation.ID
 	queuedCommand, err := cloneCommand(command)
 	if err != nil {
 		return model.Command{}, err
 	}
 	err = s.store.Update(func(st *model.State) error {
 		st.Commands = append(st.Commands, queuedCommand)
+		st.Operations = append([]model.Operation{operation}, st.Operations...)
+		if len(st.Operations) > 200 {
+			st.Operations = st.Operations[:200]
+		}
 		for i := range st.Tasks {
 			if st.Tasks[i].ID == taskID {
 				st.Tasks[i].LastRun = command.CreatedAt
