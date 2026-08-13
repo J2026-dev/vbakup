@@ -125,13 +125,25 @@ func TestArchivePreservesSymlinkTarget(t *testing.T) {
 }
 
 func TestArchiveManifestIncludesDiscoveredAndConfiguredData(t *testing.T) {
-	workspace := t.TempDir()
-	root := filepath.Join(workspace, "configured")
-	discovered := filepath.Join(workspace, "discovered")
-	if err := os.MkdirAll(root, 0700); err != nil {
+	// t.TempDir is under /tmp on Linux, which the production backup policy
+	// intentionally excludes. Use the package directory so this test exercises
+	// configured and discovered paths rather than the /tmp exclusion rule.
+	root, err := os.MkdirTemp(".", ".vbakup-configured-test-")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(discovered, 0700); err != nil {
+	discovered, err := os.MkdirTemp(".", ".vbakup-discovered-test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(root)
+	defer os.RemoveAll(discovered)
+	root, err = filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	discovered, err = filepath.Abs(discovered)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "app.conf"), []byte("service=true\n"), 0600); err != nil {

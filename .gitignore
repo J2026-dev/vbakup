@@ -5,3 +5,4 @@ bin/
 .verify-*
 .verify-gocache/
 .verify-gomodcache/
+.tmp-*/
