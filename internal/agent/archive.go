@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -159,6 +160,9 @@ func addTree(tw *tar.Writer, root, stage string, manifest *Manifest) error {
 		if info.Mode()&os.ModeSocket != 0 {
 			return nil
 		}
+		if info.Mode().IsRegular() {
+			return addRegularFile(tw, current, stage, manifest)
+		}
 		linkTarget := ""
 		if info.Mode()&os.ModeSymlink != 0 {
 			var linkErr error
@@ -172,29 +176,85 @@ func addTree(tw *tar.Writer, root, stage string, manifest *Manifest) error {
 		if err != nil {
 			return nil
 		}
-		if strings.HasPrefix(current, stage) {
-			rel, _ := filepath.Rel(stage, current)
-			header.Name = filepath.ToSlash(filepath.Join(".vbakup", rel))
-		} else {
-			header.Name = strings.TrimPrefix(filepath.ToSlash(current), "/")
-		}
+		header.Name = archiveHeaderName(current, stage)
 		if err = tw.WriteHeader(header); err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		manifest.Files++
-		manifest.Bytes += info.Size()
-		in, err := os.Open(current)
-		if err != nil {
-			manifest.Warnings = append(manifest.Warnings, current+": "+err.Error())
-			return nil
-		}
-		_, err = io.Copy(tw, in)
-		_ = in.Close()
-		return err
+		return nil
 	})
+}
+
+func addRegularFile(tw *tar.Writer, current, stage string, manifest *Manifest) error {
+	in, err := os.Open(current)
+	if err != nil {
+		manifest.Warnings = append(manifest.Warnings, current+": "+err.Error())
+		return nil
+	}
+	defer in.Close()
+
+	// Stat the opened descriptor so the tar header and bytes refer to the same
+	// file even when a log is renamed or replaced during traversal.
+	info, err := in.Stat()
+	if err != nil {
+		manifest.Warnings = append(manifest.Warnings, current+": "+err.Error())
+		return nil
+	}
+	header, err := tar.FileInfoHeader(info, "")
+	if err != nil {
+		manifest.Warnings = append(manifest.Warnings, current+": "+err.Error())
+		return nil
+	}
+	header.Name = archiveHeaderName(current, stage)
+	if err = tw.WriteHeader(header); err != nil {
+		return err
+	}
+	manifest.Files++
+	manifest.Bytes += info.Size()
+
+	written, copyErr := copyExactWithPadding(tw, in, info.Size())
+	if copyErr == nil {
+		return nil
+	}
+	if !errors.Is(copyErr, io.ErrUnexpectedEOF) {
+		return copyErr
+	}
+	missing := info.Size() - written
+	manifest.Warnings = append(manifest.Warnings, fmt.Sprintf("%s changed while archiving: padded %d missing byte(s): %v", current, missing, copyErr))
+	return nil
+}
+
+func archiveHeaderName(current, stage string) string {
+	if current == stage || strings.HasPrefix(current, stage+string(os.PathSeparator)) {
+		rel, _ := filepath.Rel(stage, current)
+		return filepath.ToSlash(filepath.Join(".vbakup", rel))
+	}
+	return strings.TrimPrefix(filepath.ToSlash(current), "/")
+}
+
+func writeZeroPadding(writer io.Writer, count int64) error {
+	zeros := make([]byte, 32*1024)
+	for count > 0 {
+		chunk := int64(len(zeros))
+		if count < chunk {
+			chunk = count
+		}
+		if _, err := writer.Write(zeros[:int(chunk)]); err != nil {
+			return err
+		}
+		count -= chunk
+	}
+	return nil
+}
+
+func copyExactWithPadding(writer io.Writer, reader io.Reader, expected int64) (int64, error) {
+	written, err := io.Copy(writer, io.LimitReader(reader, expected))
+	if err != nil || written >= expected {
+		return written, err
+	}
+	if paddingErr := writeZeroPadding(writer, expected-written); paddingErr != nil {
+		return written, paddingErr
+	}
+	return written, io.ErrUnexpectedEOF
 }
 
 func ExtractArchive(source, destination string) error {

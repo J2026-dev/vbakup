@@ -2,6 +2,7 @@ package agent
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"os"
 	"path/filepath"
@@ -9,6 +10,20 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestCopyExactWithPaddingKeepsDeclaredLength(t *testing.T) {
+	var output bytes.Buffer
+	written, err := copyExactWithPadding(&output, strings.NewReader("abc"), 8)
+	if err == nil || written != 3 {
+		t.Fatalf("written=%d err=%v", written, err)
+	}
+	if output.Len() != 8 || string(output.Bytes()[:3]) != "abc" {
+		t.Fatalf("output=%v", output.Bytes())
+	}
+	if !bytes.Equal(output.Bytes()[3:], make([]byte, 5)) {
+		t.Fatalf("padding=%v", output.Bytes()[3:])
+	}
+}
 
 func TestExtractRejectsTraversal(t *testing.T) {
 	archive := filepath.Join(t.TempDir(), "bad.tar.gz")
@@ -95,7 +110,7 @@ func TestArchivePreservesSymlinkTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	archive := filepath.Join(t.TempDir(), "backup.tar.gz")
-	if _, err := CreateArchive(archive, []string{source}, false, false); err != nil {
+	if _, err := createArchive(archive, []string{source}, false, false, Discovery{}); err != nil {
 		t.Fatal(err)
 	}
 	destination := t.TempDir()
@@ -111,28 +126,50 @@ func TestArchivePreservesSymlinkTarget(t *testing.T) {
 
 func TestArchiveManifestIncludesDiscoveredAndConfiguredData(t *testing.T) {
 	home, err := os.UserHomeDir()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	root, err := os.MkdirTemp(home, ".vbakup-configured-test-")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	discovered, err := os.MkdirTemp(home, ".vbakup-discovered-test-")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer os.RemoveAll(root)
 	defer os.RemoveAll(discovered)
-	if err := os.WriteFile(filepath.Join(root, "app.conf"), []byte("service=true\n"), 0600); err != nil { t.Fatal(err) }
-	if err := os.WriteFile(filepath.Join(discovered, "app.log"), []byte("started\n"), 0600); err != nil { t.Fatal(err) }
+	if err := os.WriteFile(filepath.Join(root, "app.conf"), []byte("service=true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(discovered, "app.log"), []byte("started\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	archive := filepath.Join(t.TempDir(), "backup.tar.gz")
 	manifest, err := createArchive(archive, []string{root}, false, false, Discovery{Paths: []string{discovered}})
-	if err != nil { t.Fatal(err) }
-	if manifest.Files < 2 || manifest.Bytes < int64(len("service=true\nstarted\n")) { t.Fatalf("manifest=%+v", manifest) }
-	if len(manifest.Paths) != 2 { t.Fatalf("paths=%v", manifest.Paths) }
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Files < 2 || manifest.Bytes < int64(len("service=true\nstarted\n")) {
+		t.Fatalf("manifest=%+v", manifest)
+	}
+	if len(manifest.Paths) != 2 {
+		t.Fatalf("paths=%v", manifest.Paths)
+	}
 	extracted := t.TempDir()
-	if err := ExtractArchive(archive, extracted); err != nil { t.Fatal(err) }
+	if err := ExtractArchive(archive, extracted); err != nil {
+		t.Fatal(err)
+	}
 	archivedManifest, err := ReadManifest(extracted)
-	if err != nil { t.Fatalf("manifest missing from archive: %v", err) }
+	if err != nil {
+		t.Fatalf("manifest missing from archive: %v", err)
+	}
 	if archivedManifest.Files < 2 || archivedManifest.Bytes < int64(len("service=true\nstarted\n")) {
 		t.Fatalf("archived manifest=%+v", archivedManifest)
 	}
 	for _, item := range []struct{ root, name string }{{root, "app.conf"}, {discovered, "app.log"}} {
-		if _, err := os.Stat(filepath.Join(extracted, filepath.FromSlash(strings.TrimPrefix(filepath.ToSlash(item.root), "/")), item.name)); err != nil { t.Fatalf("%s missing: %v", item.name, err) }
+		if _, err := os.Stat(filepath.Join(extracted, filepath.FromSlash(strings.TrimPrefix(filepath.ToSlash(item.root), "/")), item.name)); err != nil {
+			t.Fatalf("%s missing: %v", item.name, err)
+		}
 	}
 }
