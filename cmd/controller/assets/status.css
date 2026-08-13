@@ -1,0 +1,8 @@
+.status.running::before,
+.status.warning::before {
+  background: var(--amber);
+}
+
+.status.cancelled::before {
+  background: #667085;
+}

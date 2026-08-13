@@ -23,6 +23,8 @@
 - 使用站内登录页面和 HttpOnly 会话 Cookie，不再触发浏览器 Basic Auth 弹窗；可在面板退出、修改密码或撤销全部旧会话。
 - 节点列表和详情显示 agent 最近一次心跳的来源 IP；经 Cloudflare 时优先读取 `CF-Connecting-IP`，其次使用标准代理转发地址和连接地址。
 - 快照 manifest v2 记录识别到的服务、服务管理器、unit、备份前启用/运行状态以及系统快捷命令清单。
+- 原节点损坏后可在节点列表生成 15 分钟有效的一次性“重新接入”命令，新 VPS 会复用原节点记录并轮换凭据；接入不会自动恢复，快照仍由管理员手动选择。
+- 离线节点不会接受新的备份或恢复任务；排队任务可手动停止，10 分钟未被节点领取会自动失败，领取后显示为运行中。
 
 ## 架构
 
@@ -139,7 +141,7 @@ vbakup-agentctl uninstall
 2. 在新 VPS 执行控制台显示的同一条 agent 安装命令。
 3. 等待新节点在线，在“灾难恢复”选择目标备份并点击“恢复”。
 4. 选择新节点，确认覆盖后下发任务。
-5. agent 下载归档、验证 SHA-256、恢复文件和数据库 dump，并尝试重启已识别的 systemd 服务。
+5. agent 下载归档、验证 SHA-256，保留文件 UID/GID、权限与时间戳，恢复文件和数据库 dump，并尝试重启已识别的 systemd/OpenRC 服务。
 6. agent 会把 Compose 元数据恢复到原工作目录，并执行 `docker compose up -d`。
 7. 在控制台检查恢复任务结果，以及应用域名、IP 绑定、证书、数据库账号、Docker 网络等警告。
 
@@ -148,6 +150,8 @@ vbakup-agentctl uninstall
 恢复时会自动跳过 vBakup agent 自身的二进制、配置、结果缓存和 systemd/OpenRC 单元，避免正在运行的 agent 被覆盖而触发 `text file busy`。旧版本创建的快照也使用相同的跳过规则，可以直接恢复。
 
 新快照会保存 systemd/OpenRC 服务的实际 unit、备份前运行状态和启用状态。恢复时先还原 unit 与数据，再执行 systemd `daemon-reload`，重新启用原本启用的服务，并只重启备份前正在运行的服务；sing-box、Xray、1Panel 等使用同一套恢复流程。旧 manifest 仍按内置服务映射兼容恢复。
+
+对 1Panel、Xray、sing-box、Komari、Cloudreve、Nginx 等本机应用，agent 会在归档其数据前暂停备份时正在运行的服务，归档结束后恢复运行，减少 SQLite 和运行中配置文件不一致。数据库仍优先使用逻辑导出。已增加 `vless-all-in-one` 的 `/etc/vless-reality`（包括 `db.json`）识别；新 VPS 恢复 Docker 快照时，如系统缺少 Docker，agent 会通过受支持发行版的包管理器安装 Docker/Compose 运行时后再重建 Compose 项目。
 
 agent 还会扫描 `/usr/local/bin`、`/usr/local/sbin`、用户 `.local/bin` 及常见 shell profile，记录自定义可执行文件、符号链接和 alias 名称。处于用户/本地命令目录及 profile 中的内容会随文件归档恢复；清单只记录 alias 名称和来源文件，恢复过程不会主动执行 alias 内容。系统发行版管理的 `/usr/bin` 不作为自定义快捷命令恢复来源。
 

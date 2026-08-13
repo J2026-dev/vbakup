@@ -136,3 +136,59 @@ func TestCopyRestoreTreeSkipsAgentSelfFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestCopyRestoreTreeProtectsNewHostState(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	files := map[string]string{
+		"etc/ssh/sshd_config":                              "old-ssh",
+		"etc/machine-id":                                   "old-machine",
+		"var/lib/dpkg/status":                              "old-packages",
+		"var/lib/docker/overlay2/layer/diff":               "runtime-layer",
+		"var/lib/docker/volumes/app/_data/database.sqlite": "persistent-data",
+		"opt/example/config.json":                          "application-data",
+	}
+	for name, content := range files {
+		path := filepath.Join(source, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyRestoreTree(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		"etc/ssh/sshd_config",
+		"etc/machine-id",
+		"var/lib/dpkg/status",
+		"var/lib/docker/overlay2/layer/diff",
+	} {
+		if _, err := os.Stat(filepath.Join(destination, filepath.FromSlash(name))); !os.IsNotExist(err) {
+			t.Fatalf("host-specific path was restored: %s err=%v", name, err)
+		}
+	}
+	for name, want := range map[string]string{
+		"var/lib/docker/volumes/app/_data/database.sqlite": "persistent-data",
+		"opt/example/config.json":                          "application-data",
+	} {
+		got, err := os.ReadFile(filepath.Join(destination, filepath.FromSlash(name)))
+		if err != nil || string(got) != want {
+			t.Fatalf("persistent file %s was not restored: data=%q err=%v", name, got, err)
+		}
+	}
+}
+
+func TestRestorePathKeepsDockerRootTraversable(t *testing.T) {
+	if shouldSkipRestorePath("var/lib/docker") {
+		t.Fatal("docker root must remain traversable")
+	}
+	if shouldSkipRestorePath("var/lib/docker/volumes/app/_data/database.sqlite") {
+		t.Fatal("named-volume data must be restored")
+	}
+	if !shouldSkipRestorePath("var/lib/docker/overlay2/layer/diff") {
+		t.Fatal("docker runtime layers must not be restored")
+	}
+}

@@ -26,6 +26,7 @@ func (s *server) tick() {
 				st.Nodes[i].Status = "offline"
 			}
 		}
+		expireQueuedCommands(st, now, 10*time.Minute)
 		return nil
 	})
 	for _, task := range state.Tasks {
@@ -48,6 +49,9 @@ func (s *server) queueBackup(taskID string, force bool) (model.Command, error) {
 	}
 	if task == nil {
 		return model.Command{}, errNotFound
+	}
+	if !nodeIsOnline(state, task.NodeID, time.Now().UTC()) {
+		return model.Command{}, errors.New("节点离线，备份任务未下发")
 	}
 	for _, command := range state.Commands {
 		if command.Type == "backup" && command.Task != nil && command.Task.ID == taskID {
@@ -89,6 +93,42 @@ func (s *server) queueBackup(taskID string, force bool) (model.Command, error) {
 		return nil
 	})
 	return command, err
+}
+
+func nodeIsOnline(state model.State, nodeID string, now time.Time) bool {
+	for _, node := range state.Nodes {
+		if node.ID == nodeID {
+			return !node.LastSeen.IsZero() && now.Sub(node.LastSeen) <= 90*time.Second
+		}
+	}
+	return false
+}
+
+func expireQueuedCommands(state *model.State, now time.Time, timeout time.Duration) {
+	kept := state.Commands[:0]
+	for _, command := range state.Commands {
+		if command.ClaimedAt.IsZero() && now.Sub(command.CreatedAt) > timeout {
+			operationID, _ := command.Payload["operation_id"].(string)
+			for i := range state.Operations {
+				if state.Operations[i].ID == operationID {
+					state.Operations[i].Status = "failed"
+					state.Operations[i].Message = "节点未领取任务，排队超时"
+					state.Operations[i].CompletedAt = now
+				}
+			}
+			if command.Task != nil {
+				for i := range state.Tasks {
+					if state.Tasks[i].ID == command.Task.ID {
+						state.Tasks[i].LastStatus = "failed"
+						state.Tasks[i].LastMessage = "节点未领取任务，排队超时"
+					}
+				}
+			}
+			continue
+		}
+		kept = append(kept, command)
+	}
+	state.Commands = kept
 }
 
 func scheduleInterval(value string) (time.Duration, bool) {

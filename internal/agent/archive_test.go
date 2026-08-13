@@ -208,3 +208,28 @@ func TestAgentSelfFilesAreExcluded(t *testing.T) {
 		t.Fatal("ordinary application data was excluded")
 	}
 }
+
+func TestHostIdentityAndDockerRuntimeAreExcluded(t *testing.T) {
+	for _, path := range []string{
+		"/etc/ssh/sshd_config",
+		"/etc/machine-id",
+		"/etc/netplan/50-cloud-init.yaml",
+		"/var/lib/dpkg/status",
+		"/var/lib/docker/overlay2/layer/diff",
+	} {
+		if !isExcluded(path) {
+			t.Fatalf("host-specific path is not excluded: %s", path)
+		}
+	}
+	for _, path := range []string{
+		"/var/lib/docker/volumes/app-data/_data/database.sqlite",
+		"/etc/my-service/application.ini",
+	} {
+		if isExcluded(path) {
+			t.Fatalf("persistent application data was excluded: %s", path)
+		}
+	}
+	if isExcluded("/var/lib/docker") {
+		t.Fatal("docker root must remain traversable so named volumes can be reached")
+	}
+}

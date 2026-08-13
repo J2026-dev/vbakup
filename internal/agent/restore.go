@@ -1,17 +1,23 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 func StopServices(manifest Manifest) []string {
 	var warnings []string
 	for _, service := range restorableServices(manifest) {
 		if manifest.Version >= 2 && !service.WasActive {
+			continue
+		}
+		if !serviceUnitAvailable(service) {
 			continue
 		}
 		if err := serviceCommand(service.Manager, "stop", service.Unit); err != nil {
@@ -52,6 +58,10 @@ func RestoreServices(metadataRoot, destinationRoot string, manifest Manifest) []
 		}
 		if err := serviceCommand(service.Manager, "restart", service.Unit); err != nil {
 			warnings = append(warnings, fmt.Sprintf("restart %s: %v", service.Unit, err))
+			continue
+		}
+		if err := verifyServiceActive(service); err != nil {
+			warnings = append(warnings, fmt.Sprintf("verify %s: %v", service.Unit, err))
 		}
 	}
 	for _, project := range manifest.Discovery.ComposeProjects {
@@ -65,7 +75,11 @@ func RestoreServices(metadataRoot, destinationRoot string, manifest Manifest) []
 			warnings = append(warnings, "compose "+project+": "+err.Error())
 			continue
 		}
-		command := exec.Command("docker", "compose", "up", "-d")
+		command, commandErr := dockerComposeCommand()
+		if commandErr != nil {
+			warnings = append(warnings, fmt.Sprintf("compose %s: %v", project, commandErr))
+			continue
+		}
 		command.Dir = directory
 		if output, runErr := command.CombinedOutput(); runErr != nil {
 			warnings = append(warnings, fmt.Sprintf("compose %s: %v: %s", project, runErr, strings.TrimSpace(string(output))))
@@ -90,6 +104,121 @@ func RestoreServices(metadataRoot, destinationRoot string, manifest Manifest) []
 		}
 	}
 	return warnings
+}
+
+func PrepareRestoreRuntime(manifest Manifest) []string {
+	if !manifestNeedsDocker(manifest) || commandAvailable("docker") {
+		return nil
+	}
+	if err := installDockerRuntime(); err != nil {
+		return []string{"install docker runtime: " + err.Error()}
+	}
+	return nil
+}
+
+func dockerComposeCommand() (*exec.Cmd, error) {
+	if commandAvailable("docker") {
+		if exec.Command("docker", "compose", "version").Run() == nil {
+			return exec.Command("docker", "compose", "up", "-d"), nil
+		}
+	}
+	if commandAvailable("docker-compose") {
+		return exec.Command("docker-compose", "up", "-d"), nil
+	}
+	return nil, errors.New("Docker Compose is not installed")
+}
+
+func verifyServiceActive(service Service) error {
+	for attempt := 0; attempt < 5; attempt++ {
+		var err error
+		if service.Manager == "openrc" {
+			err = exec.Command("rc-service", service.Unit, "status").Run()
+		} else {
+			err = exec.Command("systemctl", "is-active", "--quiet", service.Unit).Run()
+		}
+		if err == nil {
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	if service.Manager == "systemd" {
+		output, _ := exec.Command("journalctl", "-u", service.Unit, "-n", "8", "--no-pager").CombinedOutput()
+		return fmt.Errorf("service is not active: %s", strings.TrimSpace(string(output)))
+	}
+	return errors.New("service is not active")
+}
+
+func manifestNeedsDocker(manifest Manifest) bool {
+	if len(manifest.Discovery.DockerContainers) > 0 || len(manifest.Discovery.ComposeProjects) > 0 {
+		return true
+	}
+	for _, service := range manifest.Discovery.Services {
+		if service.Name == "Docker" || service.Runtime == "docker" {
+			return true
+		}
+	}
+	return false
+}
+
+func commandAvailable(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func installDockerRuntime() error {
+	var command *exec.Cmd
+	switch {
+	case commandAvailable("apt-get"):
+		if output, err := exec.Command("apt-get", "update").CombinedOutput(); err != nil {
+			return fmt.Errorf("apt-get update: %v: %s", err, strings.TrimSpace(string(output)))
+		}
+		command = exec.Command("apt-get", "install", "-y", "docker.io", "docker-compose-plugin")
+		if output, err := command.CombinedOutput(); err != nil {
+			fallback := exec.Command("apt-get", "install", "-y", "docker.io", "docker-compose")
+			if fallbackOutput, fallbackErr := fallback.CombinedOutput(); fallbackErr != nil {
+				return fmt.Errorf("%v: %s; fallback: %v: %s", err, strings.TrimSpace(string(output)), fallbackErr, strings.TrimSpace(string(fallbackOutput)))
+			}
+			command = nil
+		}
+	case commandAvailable("dnf"):
+		command = exec.Command("dnf", "install", "-y", "docker", "docker-compose-plugin")
+	case commandAvailable("yum"):
+		command = exec.Command("yum", "install", "-y", "docker")
+	case commandAvailable("apk"):
+		command = exec.Command("apk", "add", "--no-cache", "docker", "docker-cli-compose")
+	default:
+		return errors.New("unsupported package manager")
+	}
+	if command != nil {
+		if output, err := command.CombinedOutput(); err != nil {
+			return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(output)))
+		}
+	}
+	if commandAvailable("systemctl") {
+		if output, err := exec.Command("systemctl", "enable", "--now", "docker").CombinedOutput(); err != nil {
+			return fmt.Errorf("enable docker: %v: %s", err, strings.TrimSpace(string(output)))
+		}
+	} else if commandAvailable("rc-update") {
+		_ = exec.Command("rc-update", "add", "docker", "boot").Run()
+		if output, err := exec.Command("rc-service", "docker", "start").CombinedOutput(); err != nil {
+			return fmt.Errorf("start docker: %v: %s", err, strings.TrimSpace(string(output)))
+		}
+	}
+	return nil
+}
+
+func serviceUnitAvailable(service Service) bool {
+	switch service.Manager {
+	case "openrc":
+		_, err := os.Stat(filepath.Join("/etc/init.d", service.Unit))
+		return err == nil
+	default:
+		if !commandAvailable("systemctl") {
+			return false
+		}
+		output, err := exec.Command("systemctl", "show", service.Unit, "--property=LoadState", "--value").Output()
+		return err == nil && strings.TrimSpace(string(output)) == "loaded"
+	}
 }
 
 func appendDockerRedisRestore(warnings []string, label, input, container string) []string {
@@ -142,7 +271,18 @@ func restorableServices(manifest Manifest) []Service {
 			result = append(result, service)
 		}
 	}
+	sort.SliceStable(result, func(i, j int) bool { return serviceRestorePriority(result[i]) < serviceRestorePriority(result[j]) })
 	return result
+}
+
+func serviceRestorePriority(service Service) int {
+	if service.Name == "Docker" || service.Runtime == "docker" {
+		return 0
+	}
+	if service.Kind == "database" {
+		return 1
+	}
+	return 2
 }
 
 func containsManager(services []Service, manager string) bool {

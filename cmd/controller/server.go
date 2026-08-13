@@ -72,6 +72,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/logout", s.admin(http.HandlerFunc(s.handleLogout)))
 	mux.Handle("GET /api/state", s.admin(http.HandlerFunc(s.handleState)))
 	mux.Handle("PATCH /api/nodes/{id}", s.admin(http.HandlerFunc(s.handleUpdateNode)))
+	mux.Handle("POST /api/nodes/{id}/reconnect-command", s.admin(http.HandlerFunc(s.handleReconnectCommand)))
 	mux.Handle("POST /api/nodes/{id}/auto-update", s.admin(http.HandlerFunc(s.handleNodeAutoUpdate)))
 	mux.Handle("DELETE /api/nodes/{id}", s.admin(http.HandlerFunc(s.handleDeleteNode)))
 	mux.Handle("POST /api/repositories", s.admin(http.HandlerFunc(s.handleCreateRepository)))
@@ -81,6 +82,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("PATCH /api/tasks/{id}", s.admin(http.HandlerFunc(s.handleUpdateTask)))
 	mux.Handle("DELETE /api/tasks/{id}", s.admin(http.HandlerFunc(s.handleDeleteTask)))
 	mux.Handle("POST /api/tasks/{id}/run", s.admin(http.HandlerFunc(s.handleRunTask)))
+	mux.Handle("POST /api/operations/{id}/cancel", s.admin(http.HandlerFunc(s.handleCancelOperation)))
 	mux.Handle("POST /api/backups/{id}/restore", s.admin(http.HandlerFunc(s.handleRestore)))
 	mux.Handle("DELETE /api/backups/{id}", s.admin(http.HandlerFunc(s.handleDeleteBackup)))
 	mux.Handle("POST /api/admin/password", s.admin(http.HandlerFunc(s.handleChangePassword)))
@@ -88,6 +90,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("GET /install.sh", http.HandlerFunc(s.handleInstaller))
 	mux.Handle("GET /agentctl.sh", http.HandlerFunc(s.handleAgentctl))
 	mux.Handle("POST /api/agent/register", http.HandlerFunc(s.handleRegister))
+	mux.Handle("POST /api/agent/reconnect", http.HandlerFunc(s.handleReconnect))
 	mux.Handle("POST /api/agent/{node}/heartbeat", http.HandlerFunc(s.handleHeartbeat))
 	mux.Handle("GET /api/agent/{node}/commands", http.HandlerFunc(s.handleCommands))
 	mux.Handle("POST /api/agent/{node}/commands/{command}/result", http.HandlerFunc(s.handleCommandResult))
@@ -174,6 +177,8 @@ func (s *server) handleState(w http.ResponseWriter, _ *http.Request) {
 	state := s.store.Snapshot()
 	for i := range state.Nodes {
 		state.Nodes[i].TokenHash = ""
+		state.Nodes[i].ReconnectTokenHash = ""
+		state.Nodes[i].ReconnectExpiresAt = time.Time{}
 		if state.Nodes[i].LastSeen.IsZero() || time.Since(state.Nodes[i].LastSeen) > 90*time.Second {
 			state.Nodes[i].Status = "offline"
 		} else {
@@ -193,6 +198,32 @@ func (s *server) handleState(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+func (s *server) handleReconnectCommand(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("id")
+	token := randomToken(32)
+	expires := time.Now().UTC().Add(15 * time.Minute)
+	err := s.store.Update(func(st *model.State) error {
+		for i := range st.Nodes {
+			if st.Nodes[i].ID == nodeID {
+				st.Nodes[i].ReconnectTokenHash = hashToken(token)
+				st.Nodes[i].ReconnectExpiresAt = expires
+				return nil
+			}
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "节点不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "无法生成重新接入命令")
+		return
+	}
+	command := fmt.Sprintf("curl -fsSL %s/install.sh | sudo sh -s -- --controller %s --node-id %s --reconnect %s", s.publicURL, s.publicURL, nodeID, token)
+	writeJSON(w, http.StatusOK, map[string]any{"command": command, "expires_at": expires})
+}
+
 func (s *server) handleNodeAutoUpdate(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Enabled bool `json:"enabled"`
@@ -202,8 +233,13 @@ func (s *server) handleNodeAutoUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	nodeID := r.PathValue("id")
-	if !hasNode(s.store.Snapshot(), nodeID) {
+	state := s.store.Snapshot()
+	if !hasNode(state, nodeID) {
 		writeError(w, http.StatusNotFound, "节点不存在")
+		return
+	}
+	if !nodeIsOnline(state, nodeID, time.Now().UTC()) {
+		writeError(w, http.StatusConflict, "节点离线，无法下发配置")
 		return
 	}
 	operation := model.Operation{ID: id.New("op"), Type: "configure", NodeID: nodeID, Status: "queued", Message: "等待节点应用自动升级设置", CreatedAt: time.Now().UTC()}
@@ -631,6 +667,10 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "目标节点不存在")
 		return
 	}
+	if !nodeIsOnline(state, in.NodeID, time.Now().UTC()) {
+		writeError(w, http.StatusConflict, "目标节点离线，无法下发恢复任务")
+		return
+	}
 	operation := model.Operation{ID: id.New("op"), Type: "restore", NodeID: in.NodeID, BackupID: backup.ID, Status: "queued", CreatedAt: time.Now().UTC()}
 	command := model.Command{ID: id.New("cmd"), NodeID: in.NodeID, Type: "restore", Payload: map[string]any{"repository_id": backup.RepositoryID, "backup": backup, "confirm": true, "operation_id": operation.ID}, CreatedAt: time.Now().UTC()}
 	if err := s.store.Update(func(st *model.State) error {
@@ -642,6 +682,53 @@ func (s *server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 202, command)
+}
+
+func (s *server) handleCancelOperation(w http.ResponseWriter, r *http.Request) {
+	operationID := r.PathValue("id")
+	err := s.store.Update(func(st *model.State) error {
+		commandIndex := -1
+		var cancelled model.Command
+		for i, command := range st.Commands {
+			if command.Payload != nil && command.Payload["operation_id"] == operationID {
+				if !command.ClaimedAt.IsZero() {
+					return errors.New("任务已经由节点开始执行，不能安全停止")
+				}
+				commandIndex = i
+				cancelled = command
+				break
+			}
+		}
+		if cancelled.Task != nil {
+			for i := range st.Tasks {
+				if st.Tasks[i].ID == cancelled.Task.ID {
+					st.Tasks[i].LastStatus = "cancelled"
+					st.Tasks[i].LastMessage = "用户已停止排队任务"
+				}
+			}
+		}
+		if commandIndex < 0 {
+			return errNotFound
+		}
+		st.Commands = append(st.Commands[:commandIndex], st.Commands[commandIndex+1:]...)
+		for i := range st.Operations {
+			if st.Operations[i].ID == operationID {
+				st.Operations[i].Status = "cancelled"
+				st.Operations[i].Message = "用户已停止排队任务"
+				st.Operations[i].CompletedAt = time.Now().UTC()
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "排队任务不存在或已经结束")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *server) handleInstaller(w http.ResponseWriter, _ *http.Request) {
@@ -681,6 +768,73 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]string{"node_id": node.ID, "token": token, "controller": s.publicURL})
+}
+
+func (s *server) handleReconnect(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		NodeID       string `json:"node_id"`
+		Reconnect    string `json:"reconnect"`
+		Name         string `json:"name"`
+		OS           string `json:"os"`
+		Architecture string `json:"architecture"`
+		AgentVersion string `json:"agent_version"`
+	}
+	if decodeJSON(r, &in) != nil || in.NodeID == "" || in.Reconnect == "" {
+		writeError(w, http.StatusBadRequest, "重新接入参数无效")
+		return
+	}
+	token := randomToken(32)
+	now := time.Now().UTC()
+	err := s.store.Update(func(st *model.State) error {
+		for i := range st.Nodes {
+			node := &st.Nodes[i]
+			if node.ID != in.NodeID {
+				continue
+			}
+			if node.ReconnectTokenHash == "" || now.After(node.ReconnectExpiresAt) || subtle.ConstantTimeCompare([]byte(node.ReconnectTokenHash), []byte(hashToken(in.Reconnect))) != 1 {
+				return errors.New("重新接入命令已失效，请在主控重新生成")
+			}
+			node.TokenHash = hashToken(token)
+			node.ReconnectTokenHash = ""
+			node.ReconnectExpiresAt = time.Time{}
+			node.Status = "online"
+			node.LastSeen = now
+			node.IPAddress = requestClientIP(r)
+			if strings.TrimSpace(in.Name) != "" {
+				node.Name = in.Name
+			}
+			node.OS = in.OS
+			node.Architecture = in.Architecture
+			node.AgentVersion = in.AgentVersion
+			keptCommands := st.Commands[:0]
+			for _, command := range st.Commands {
+				if command.NodeID == node.ID {
+					operationID, _ := command.Payload["operation_id"].(string)
+					for j := range st.Operations {
+						if st.Operations[j].ID == operationID && (st.Operations[j].Status == "queued" || st.Operations[j].Status == "running") {
+							st.Operations[j].Status = "cancelled"
+							st.Operations[j].Message = "节点重新接入，旧任务已取消"
+							st.Operations[j].CompletedAt = now
+						}
+					}
+					continue
+				}
+				keptCommands = append(keptCommands, command)
+			}
+			st.Commands = keptCommands
+			return nil
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "原节点不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"node_id": in.NodeID, "token": token, "controller": s.publicURL})
 }
 
 func (s *server) authenticateNode(w http.ResponseWriter, r *http.Request) (model.Node, bool) {
@@ -786,6 +940,13 @@ func (s *server) handleCommands(w http.ResponseWriter, r *http.Request) {
 			c := &st.Commands[i]
 			if c.NodeID == node.ID && (c.ClaimedAt.IsZero() || now.Sub(c.ClaimedAt) > 30*time.Minute) {
 				c.ClaimedAt = now
+				operationID, _ := c.Payload["operation_id"].(string)
+				for j := range st.Operations {
+					if st.Operations[j].ID == operationID {
+						st.Operations[j].Status = "running"
+						st.Operations[j].Message = "节点正在执行任务"
+					}
+				}
 				copy, err := cloneCommand(*c)
 				if err != nil {
 					return err

@@ -17,6 +17,7 @@ type Service struct {
 	Unit       string   `json:"unit,omitempty"`
 	WasActive  bool     `json:"was_active,omitempty"`
 	WasEnabled bool     `json:"was_enabled,omitempty"`
+	Runtime    string   `json:"runtime,omitempty"`
 }
 
 type ShortcutCommand struct {
@@ -92,8 +93,9 @@ func Discover() Discovery {
 
 func serviceDefinitions() []serviceDefinition {
 	return []serviceDefinition{
-		{Service: Service{Name: "1Panel", Kind: "panel", Paths: []string{"/opt/1panel", "/etc/1panel"}}, Units: []string{"1panel"}, Binaries: []string{"/usr/local/bin/1pctl"}},
-		{Service: Service{Name: "Docker", Kind: "container", Paths: []string{"/etc/docker", "/var/lib/docker/volumes"}}, Units: []string{"docker"}},
+		{Service: Service{Name: "1Panel", Kind: "panel", Paths: []string{"/opt/1panel", "/etc/1panel", "/var/lib/1panel"}}, Units: []string{"1panel"}, Binaries: []string{"/usr/local/bin/1pctl"}},
+		{Service: Service{Name: "Docker", Kind: "container", Runtime: "docker", Paths: []string{"/etc/docker", "/var/lib/docker/volumes"}}, Units: []string{"docker"}},
+		{Service: Service{Name: "vless-all-in-one", Kind: "proxy-manager", Paths: []string{"/etc/vless-reality"}}, Binaries: []string{"/usr/local/bin/vless-server.sh"}},
 		{Service: Service{Name: "Xray", Kind: "proxy", Paths: []string{"/usr/local/etc/xray", "/etc/xray"}}, Units: []string{"xray"}, Binaries: []string{"/usr/local/bin/xray", "/usr/bin/xray"}},
 		{Service: Service{Name: "sing-box", Kind: "proxy", Paths: []string{"/etc/sing-box", "/usr/local/etc/sing-box"}}, Units: []string{"sing-box"}, Binaries: []string{"/usr/local/bin/sing-box", "/usr/bin/sing-box"}},
 		{Service: Service{Name: "Komari Agent", Kind: "monitoring", Paths: []string{"/opt/komari", "/etc/komari"}}, Units: []string{"komari-agent", "komari"}, Binaries: []string{"/usr/local/bin/komari-agent", "/usr/bin/komari-agent"}},
@@ -144,7 +146,8 @@ func parseSystemdProperties(output string) map[string]string {
 
 func existingUnitPath(path string) string {
 	path = strings.TrimSpace(path)
-	if filepath.IsAbs(path) {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	if filepath.IsAbs(path) && (strings.HasPrefix(clean, "/etc/systemd/system/") || strings.HasPrefix(clean, "/etc/init.d/")) {
 		if _, err := os.Stat(path); err == nil {
 			return path
 		}

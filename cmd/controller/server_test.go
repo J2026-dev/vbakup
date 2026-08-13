@@ -98,6 +98,23 @@ func TestRequestClientIPUsesValidatedProxyHeaders(t *testing.T) {
 	}
 }
 
+func TestInstallerReplacesReleaseBasePlaceholder(t *testing.T) {
+	app, _ := newTestServer(t)
+	app.releaseBase = "https://releases.example.com/vbakup"
+	response := httptest.NewRecorder()
+	app.handleInstaller(response, httptest.NewRequest(http.MethodGet, "/install.sh", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	if strings.Contains(body, "__RELEASE_BASE__") {
+		t.Fatal("installer still contains release placeholder")
+	}
+	if !strings.Contains(body, "https://releases.example.com/vbakup/vbakup-agent-linux-$ARCH") {
+		t.Fatalf("installer does not contain configured release base: %s", body)
+	}
+}
+
 func TestStateUsesEmptyArraysAndIncludesInstallCommand(t *testing.T) {
 	app, _ := newTestServer(t)
 	response := httptest.NewRecorder()
@@ -145,7 +162,7 @@ func TestStateMarksStaleNodeOffline(t *testing.T) {
 func TestUpdateNodeNoteAndQueueReadableName(t *testing.T) {
 	app, state := newTestServer(t)
 	if err := state.Update(func(st *model.State) error {
-		st.Nodes = append(st.Nodes, model.Node{ID: "node-12345678", Name: "host-1"})
+		st.Nodes = append(st.Nodes, model.Node{ID: "node-12345678", Name: "host-1", LastSeen: time.Now().UTC()})
 		st.Repositories = append(st.Repositories, model.Repository{ID: "repo-1"})
 		st.Tasks = append(st.Tasks, model.Task{ID: "task-1", NodeID: "node-12345678", RepositoryID: "repo-1", Schedule: "@daily", Enabled: true})
 		return nil
@@ -291,6 +308,7 @@ func TestQueuedCommandDoesNotPersistRepositoryPassword(t *testing.T) {
 	app := &server{store: state, vault: secrets}
 	err = state.Update(func(st *model.State) error {
 		st.Repositories = append(st.Repositories, model.Repository{ID: "repo-1", URL: "https://dav.example", PasswordEncrypted: encrypted})
+		st.Nodes = append(st.Nodes, model.Node{ID: "node-1", LastSeen: time.Now().UTC()})
 		st.Tasks = append(st.Tasks, model.Task{ID: "task-1", NodeID: "node-1", RepositoryID: "repo-1", Schedule: "@daily", Enabled: true, CreatedAt: time.Now()})
 		return nil
 	})
@@ -344,7 +362,8 @@ func TestConfigureCommandDoesNotRequireRepository(t *testing.T) {
 	token := "agent-token"
 	if err := state.Update(func(st *model.State) error {
 		st.Nodes = append(st.Nodes, model.Node{ID: "node-1", TokenHash: hashToken(token)})
-		st.Commands = append(st.Commands, model.Command{ID: "cmd-1", NodeID: "node-1", Type: "configure", Payload: map[string]any{"auto_update": true}})
+		st.Commands = append(st.Commands, model.Command{ID: "cmd-1", NodeID: "node-1", Type: "configure", Payload: map[string]any{"auto_update": true, "operation_id": "op-1"}})
+		st.Operations = append(st.Operations, model.Operation{ID: "op-1", NodeID: "node-1", Type: "configure", Status: "queued"})
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -365,6 +384,9 @@ func TestConfigureCommandDoesNotRequireRepository(t *testing.T) {
 	}
 	if len(body.Commands) != 1 || body.Commands[0].Type != "configure" {
 		t.Fatalf("commands=%+v", body.Commands)
+	}
+	if state.Snapshot().Operations[0].Status != "running" {
+		t.Fatalf("operation did not become running: %+v", state.Snapshot().Operations)
 	}
 }
 
@@ -430,5 +452,102 @@ func TestRestoreResultCannotCreateBackupOrPanic(t *testing.T) {
 	}
 	if len(state.Snapshot().Backups) != 0 {
 		t.Fatal("restore result created a backup record")
+	}
+}
+
+func TestOfflineNodeRejectsBackupAndRestore(t *testing.T) {
+	app, state := newTestServer(t)
+	if err := state.Update(func(st *model.State) error {
+		st.Nodes = append(st.Nodes, model.Node{ID: "node-offline", LastSeen: time.Now().UTC().Add(-5 * time.Minute)})
+		st.Repositories = append(st.Repositories, model.Repository{ID: "repo-1"})
+		st.Tasks = append(st.Tasks, model.Task{ID: "task-1", NodeID: "node-offline", RepositoryID: "repo-1", Schedule: "@daily"})
+		st.Backups = append(st.Backups, model.Backup{ID: "backup-1", RepositoryID: "repo-1"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.queueBackup("task-1", true); err == nil || !strings.Contains(err.Error(), "离线") {
+		t.Fatalf("backup error=%v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/backups/backup-1/restore", strings.NewReader(`{"node_id":"node-offline","confirm":true}`))
+	request.SetPathValue("id", "backup-1")
+	response := httptest.NewRecorder()
+	app.handleRestore(response, request)
+	if response.Code != http.StatusConflict || len(state.Snapshot().Commands) != 0 {
+		t.Fatalf("restore status=%d commands=%v body=%s", response.Code, state.Snapshot().Commands, response.Body.String())
+	}
+}
+
+func TestCancelQueuedOperationAndExpireTimeout(t *testing.T) {
+	app, state := newTestServer(t)
+	if err := state.Update(func(st *model.State) error {
+		st.Nodes = append(st.Nodes, model.Node{ID: "node-1", LastSeen: time.Now().UTC()})
+		st.Repositories = append(st.Repositories, model.Repository{ID: "repo-1"})
+		st.Tasks = append(st.Tasks, model.Task{ID: "task-1", NodeID: "node-1", RepositoryID: "repo-1", Schedule: "@daily"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	command, err := app.queueBackup("task-1", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationID := command.Payload["operation_id"].(string)
+	request := httptest.NewRequest(http.MethodPost, "/api/operations/"+operationID+"/cancel", nil)
+	request.SetPathValue("id", operationID)
+	response := httptest.NewRecorder()
+	app.handleCancelOperation(response, request)
+	if response.Code != http.StatusOK || len(state.Snapshot().Commands) != 0 || state.Snapshot().Operations[0].Status != "cancelled" {
+		t.Fatalf("cancel status=%d state=%+v", response.Code, state.Snapshot())
+	}
+
+	now := time.Now().UTC()
+	queued := model.State{Commands: []model.Command{{ID: "old", CreatedAt: now.Add(-11 * time.Minute), Payload: map[string]any{"operation_id": "old-op"}}}, Operations: []model.Operation{{ID: "old-op", Status: "queued"}}}
+	expireQueuedCommands(&queued, now, 10*time.Minute)
+	if len(queued.Commands) != 0 || queued.Operations[0].Status != "failed" || queued.Operations[0].CompletedAt.IsZero() {
+		t.Fatalf("expired state=%+v", queued)
+	}
+}
+
+func TestReconnectReusesNodeAndCancelsOldCommands(t *testing.T) {
+	app, state := newTestServer(t)
+	app.publicURL = "https://backup.example.com"
+	if err := state.Update(func(st *model.State) error {
+		st.Nodes = append(st.Nodes, model.Node{ID: "node-1", Name: "old-host", TokenHash: hashToken("old-token")})
+		st.Commands = append(st.Commands, model.Command{ID: "cmd-old", NodeID: "node-1", Payload: map[string]any{"operation_id": "op-old"}})
+		st.Operations = append(st.Operations, model.Operation{ID: "op-old", NodeID: "node-1", Status: "queued"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commandResponse := httptest.NewRecorder()
+	commandRequest := httptest.NewRequest(http.MethodPost, "/api/nodes/node-1/reconnect-command", nil)
+	commandRequest.SetPathValue("id", "node-1")
+	app.handleReconnectCommand(commandResponse, commandRequest)
+	var generated struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(commandResponse.Body.Bytes(), &generated); err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.Fields(generated.Command)
+	reconnectToken := parts[len(parts)-1]
+	body := fmt.Sprintf(`{"node_id":"node-1","reconnect":%q,"name":"new-host","os":"linux","architecture":"amd64"}`, reconnectToken)
+	reconnectResponse := httptest.NewRecorder()
+	app.handleReconnect(reconnectResponse, httptest.NewRequest(http.MethodPost, "/api/agent/reconnect", strings.NewReader(body)))
+	if reconnectResponse.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", reconnectResponse.Code, reconnectResponse.Body.String())
+	}
+	snapshot := state.Snapshot()
+	if len(snapshot.Nodes) != 1 || snapshot.Nodes[0].Name != "new-host" || snapshot.Nodes[0].TokenHash == hashToken("old-token") || snapshot.Nodes[0].ReconnectTokenHash != "" {
+		t.Fatalf("node=%+v", snapshot.Nodes)
+	}
+	if len(snapshot.Commands) != 0 || snapshot.Operations[0].Status != "cancelled" {
+		t.Fatalf("commands=%+v operations=%+v", snapshot.Commands, snapshot.Operations)
+	}
+	second := httptest.NewRecorder()
+	app.handleReconnect(second, httptest.NewRequest(http.MethodPost, "/api/agent/reconnect", strings.NewReader(body)))
+	if second.Code != http.StatusUnauthorized {
+		t.Fatalf("one-time token was reused: status=%d", second.Code)
 	}
 }

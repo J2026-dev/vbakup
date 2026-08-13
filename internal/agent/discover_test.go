@@ -2,8 +2,8 @@ package agent
 
 import "testing"
 
-func TestServiceDefinitionsIncludeSingBoxAnd1Panel(t *testing.T) {
-	wanted := map[string]bool{"sing-box": false, "1Panel": false}
+func TestServiceDefinitionsIncludeSupportedRecoveryServices(t *testing.T) {
+	wanted := map[string]bool{"sing-box": false, "1Panel": false, "vless-all-in-one": false, "Docker": false}
 	for _, definition := range serviceDefinitions() {
 		if _, ok := wanted[definition.Name]; ok {
 			wanted[definition.Name] = true
@@ -12,6 +12,14 @@ func TestServiceDefinitionsIncludeSingBoxAnd1Panel(t *testing.T) {
 	for name, found := range wanted {
 		if !found {
 			t.Fatalf("service definition %q is missing", name)
+		}
+	}
+	for _, definition := range serviceDefinitions() {
+		if definition.Name == "vless-all-in-one" && !contains(definition.Paths, "/etc/vless-reality") {
+			t.Fatal("vless-all-in-one persistent database path is missing")
+		}
+		if definition.Name == "Docker" && definition.Runtime != "docker" {
+			t.Fatal("Docker runtime recovery marker is missing")
 		}
 	}
 }

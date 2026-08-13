@@ -3,10 +3,14 @@ set -eu
 
 CONTROLLER=""
 SECRET=""
+NODE_ID=""
+RECONNECT=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --controller) CONTROLLER="$2"; shift 2 ;;
     --secret) SECRET="$2"; shift 2 ;;
+    --node-id) NODE_ID="$2"; shift 2 ;;
+    --reconnect) RECONNECT="$2"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -31,7 +35,7 @@ curl -fL "__RELEASE_BASE__/vbakup-agent-linux-$ARCH.sha256" -o "$TMP_DIR/vbakup-
 install -m 0755 "$TMP_DIR/vbakup-agent" /usr/local/bin/vbakup-agent
 curl -fsSL "$CONTROLLER/agentctl.sh" -o "$TMP_DIR/vbakup-agentctl"
 install -m 0755 "$TMP_DIR/vbakup-agentctl" /usr/local/bin/vbakup-agentctl
-if [ -s /etc/vbakup/agent.json ]; then
+if [ -s /etc/vbakup/agent.json ] && [ -z "$RECONNECT" ]; then
 	NODE_ID=$(sed -n 's/.*"node_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/vbakup/agent.json)
 	[ -n "$NODE_ID" ] || { echo "Existing agent configuration is invalid; move /etc/vbakup/agent.json aside and retry." >&2; exit 1; }
 	CONFIGURED_CONTROLLER=$(sed -n 's/.*"controller"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' /etc/vbakup/agent.json)
@@ -41,9 +45,14 @@ if [ -s /etc/vbakup/agent.json ]; then
 	fi
 	echo "Existing node configuration found; updating the agent without registering a duplicate node."
 else
-	[ -n "$SECRET" ] || { echo "--secret is required for first registration." >&2; exit 1; }
   HOST=$(hostname | tr -cd 'A-Za-z0-9._-')
-	RESPONSE=$(curl -fsS -X POST "$CONTROLLER/api/agent/register" -H 'Content-Type: application/json' --data "{\"name\":\"$HOST\",\"secret\":\"$SECRET\",\"os\":\"linux\",\"architecture\":\"$ARCH\",\"agent_version\":\"installing\"}")
+	if [ -n "$NODE_ID" ] || [ -n "$RECONNECT" ]; then
+		[ -n "$NODE_ID" ] && [ -n "$RECONNECT" ] || { echo "--node-id and --reconnect must be used together." >&2; exit 1; }
+		RESPONSE=$(curl -fsS -X POST "$CONTROLLER/api/agent/reconnect" -H 'Content-Type: application/json' --data "{\"name\":\"$HOST\",\"node_id\":\"$NODE_ID\",\"reconnect\":\"$RECONNECT\",\"os\":\"linux\",\"architecture\":\"$ARCH\",\"agent_version\":\"installing\"}")
+	else
+		[ -n "$SECRET" ] || { echo "--secret is required for first registration." >&2; exit 1; }
+		RESPONSE=$(curl -fsS -X POST "$CONTROLLER/api/agent/register" -H 'Content-Type: application/json' --data "{\"name\":\"$HOST\",\"secret\":\"$SECRET\",\"os\":\"linux\",\"architecture\":\"$ARCH\",\"agent_version\":\"installing\"}")
+	fi
   NODE_ID=$(printf '%s' "$RESPONSE" | sed -n 's/.*"node_id":"\([^"]*\)".*/\1/p')
   TOKEN=$(printf '%s' "$RESPONSE" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
   [ -n "$NODE_ID" ] && [ -n "$TOKEN" ] || { echo "Registration failed: $RESPONSE" >&2; exit 1; }

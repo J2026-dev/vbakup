@@ -31,10 +31,14 @@ type Manifest struct {
 
 var excludedPrefixes = []string{
 	"/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/var/cache",
+	"/etc/ssh", "/etc/network", "/etc/netplan", "/etc/systemd/network", "/etc/cloud", "/etc/udev",
+	"/etc/machine-id", "/etc/hostname", "/etc/hosts", "/etc/resolv.conf", "/etc/fstab",
 	"/etc/vbakup", "/var/lib/vbakup", "/usr/local/bin/vbakup-agent", "/usr/local/bin/vbakup-agentctl",
 	"/etc/systemd/system/vbakup-agent.service", "/etc/systemd/system/vbakup-agent-update.service",
 	"/etc/systemd/system/vbakup-agent-update.timer", "/etc/init.d/vbakup-agent",
-	"/var/lib/docker/overlay2",
+	"/lib/systemd/system", "/usr/lib/systemd/system",
+	"/var/lib/apt", "/var/lib/dpkg", "/var/lib/systemd", "/var/lib/containerd", "/var/lib/cloud",
+	"/var/lib/private", "/var/lib/ucf", "/var/lib/polkit-1", "/var/lib/dbus",
 }
 
 func CreateArchive(destination string, configured []string, includeDocker, includeDatabases bool) (Manifest, error) {
@@ -51,6 +55,14 @@ func createArchive(destination string, configured []string, includeDocker, inclu
 	}
 	defer os.RemoveAll(stage)
 	var restartContainers []string
+	stoppedServices, stopWarnings := stopApplicationServices(discovery.Services)
+	manifest.Warnings = append(manifest.Warnings, stopWarnings...)
+	servicesRestarted := false
+	defer func() {
+		if !servicesRestarted {
+			_, manifest.Warnings = restartApplicationServices(stoppedServices, manifest.Warnings)
+		}
+	}()
 	restarted := false
 	if includeDocker && len(discovery.DockerContainers) > 0 {
 		// Logical dumps must run while containers are still available. They are
@@ -102,6 +114,8 @@ func createArchive(destination string, configured []string, includeDocker, inclu
 		_, manifest.Warnings = startContainers(restartContainers, manifest.Warnings)
 		restarted = true
 	}
+	_, manifest.Warnings = restartApplicationServices(stoppedServices, manifest.Warnings)
+	servicesRestarted = true
 	manifestBytes, _ := json.MarshalIndent(manifest, "", "  ")
 	if err = os.WriteFile(filepath.Join(stage, "manifest.json"), manifestBytes, 0600); err != nil {
 		_ = tw.Close()
@@ -124,6 +138,37 @@ func createArchive(destination string, configured []string, includeDocker, inclu
 		err = closeErr
 	}
 	return manifest, err
+}
+
+func stopApplicationServices(services []Service) ([]Service, []string) {
+	var stopped []Service
+	var warnings []string
+	seen := map[string]bool{}
+	for _, service := range services {
+		if !service.WasActive || service.Unit == "" || service.Name == "Docker" || service.Kind == "database" {
+			continue
+		}
+		key := service.Manager + "\x00" + service.Unit
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if err := serviceCommand(service.Manager, "stop", service.Unit); err != nil {
+			warnings = append(warnings, fmt.Sprintf("backup stop %s: %v", service.Unit, err))
+			continue
+		}
+		stopped = append(stopped, service)
+	}
+	return stopped, warnings
+}
+
+func restartApplicationServices(services []Service, warnings []string) ([]Service, []string) {
+	for _, service := range services {
+		if err := serviceCommand(service.Manager, "start", service.Unit); err != nil {
+			warnings = append(warnings, fmt.Sprintf("backup start %s: %v", service.Unit, err))
+		}
+	}
+	return services, warnings
 }
 
 func stopRunningContainers(containers, warnings []string) ([]string, []string) {
@@ -279,8 +324,17 @@ func ExtractArchive(source, destination string) error {
 		return err
 	}
 	tr := tar.NewReader(gz)
-	type pendingSymlink struct{ path, target string }
+	type pendingSymlink struct {
+		path, target string
+		ownerUID     int
+		ownerGID     int
+	}
 	var symlinks []pendingSymlink
+	type pendingDirectory struct {
+		path   string
+		header *tar.Header
+	}
+	var directories []pendingDirectory
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -300,6 +354,8 @@ func ExtractArchive(source, destination string) error {
 			if err = os.MkdirAll(absolute, header.FileInfo().Mode()); err != nil {
 				return err
 			}
+			copyHeader := *header
+			directories = append(directories, pendingDirectory{path: absolute, header: &copyHeader})
 		case tar.TypeReg, tar.TypeRegA:
 			if err = os.MkdirAll(filepath.Dir(absolute), 0750); err != nil {
 				return err
@@ -316,8 +372,11 @@ func ExtractArchive(source, destination string) error {
 			if closeErr != nil {
 				return closeErr
 			}
+			if err = applyTarMetadata(absolute, header, false); err != nil {
+				return err
+			}
 		case tar.TypeSymlink:
-			symlinks = append(symlinks, pendingSymlink{path: absolute, target: header.Linkname})
+			symlinks = append(symlinks, pendingSymlink{path: absolute, target: header.Linkname, ownerUID: header.Uid, ownerGID: header.Gid})
 		}
 	}
 	for _, link := range symlinks {
@@ -333,8 +392,32 @@ func ExtractArchive(source, destination string) error {
 		if err = os.Symlink(link.target, link.path); err != nil {
 			return err
 		}
+		if err = applySymlinkOwner(link.path, link.ownerUID, link.ownerGID); err != nil {
+			return err
+		}
+	}
+	for i := len(directories) - 1; i >= 0; i-- {
+		if err = applyTarMetadata(directories[i].path, directories[i].header, false); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func applyTarMetadata(path string, header *tar.Header, symlink bool) error {
+	if !symlink {
+		if err := os.Chmod(path, header.FileInfo().Mode()); err != nil {
+			return err
+		}
+		if err := os.Chtimes(path, header.AccessTime, header.ModTime); err != nil {
+			return err
+		}
+	}
+	return applyArchiveOwner(path, header.Uid, header.Gid, symlink)
+}
+
+func applySymlinkOwner(path string, uid, gid int) error {
+	return applyArchiveOwner(path, uid, gid, true)
 }
 
 func ReadManifest(extractedRoot string) (Manifest, error) {
@@ -514,6 +597,18 @@ func cleanAbsolutePaths(paths []string) []string {
 }
 func isExcluded(value string) bool {
 	clean := filepath.ToSlash(filepath.Clean(value))
+	// Keep the root traversable so a whole-filesystem backup can still reach
+	// named volumes. Docker's images, layers, containers, and runtime state are
+	// rebuilt from manifests and Compose metadata during recovery.
+	if clean == "/var/lib/docker" {
+		return false
+	}
+	if clean == "/var/lib/docker/volumes" || strings.HasPrefix(clean, "/var/lib/docker/volumes/") {
+		return false
+	}
+	if strings.HasPrefix(clean, "/var/lib/docker/") {
+		return true
+	}
 	for _, prefix := range excludedPrefixes {
 		if clean == prefix || strings.HasPrefix(clean, prefix+"/") {
 			return true

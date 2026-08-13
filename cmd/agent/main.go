@@ -399,12 +399,19 @@ func (a *app) restore(command model.Command) model.CommandResult {
 	if err != nil {
 		return failure("manifest validation failed: " + err.Error())
 	}
-	warnings := agentlib.StopServices(manifest)
+	warnings := agentlib.PrepareRestoreRuntime(manifest)
+	warnings = append(warnings, agentlib.StopServices(manifest)...)
 	if err = copyRestoreTree(stage, "/"); err != nil {
 		return failure("file restore failed: " + err.Error())
 	}
 	warnings = append(warnings, agentlib.RestoreServices(stage, "/", manifest)...)
-	return model.CommandResult{Status: "success", Message: fmt.Sprintf("restore completed with %d warning(s)", len(warnings)), Details: map[string]any{"warnings": warnings}}
+	status := "success"
+	message := "restore completed"
+	if len(warnings) > 0 {
+		status = "warning"
+		message = fmt.Sprintf("restore completed with %d warning(s)", len(warnings))
+	}
+	return model.CommandResult{Status: status, Message: message, Details: map[string]any{"warnings": warnings}}
 }
 
 func credentials(payload map[string]any) (model.RepositoryCredentials, error) {
@@ -458,7 +465,11 @@ func (a *app) request(method, endpoint string, in, out any) error {
 	return nil
 }
 func copyRestoreTree(source, destination string) error {
-	return filepath.Walk(source, func(current string, info os.FileInfo, walkErr error) error {
+	var directories []struct {
+		path string
+		info os.FileInfo
+	}
+	err := filepath.Walk(source, func(current string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -474,7 +485,14 @@ func copyRestoreTree(source, destination string) error {
 		}
 		target := filepath.Join(destination, relative)
 		if info.IsDir() {
-			return os.MkdirAll(target, info.Mode())
+			if err := os.MkdirAll(target, info.Mode()); err != nil {
+				return err
+			}
+			directories = append(directories, struct {
+				path string
+				info os.FileInfo
+			}{target, info})
+			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			link, err := os.Readlink(current)
@@ -482,7 +500,10 @@ func copyRestoreTree(source, destination string) error {
 				return err
 			}
 			_ = os.Remove(target)
-			return os.Symlink(link, target)
+			if err = os.Symlink(link, target); err != nil {
+				return err
+			}
+			return applyRestoreOwner(target, info, true)
 		}
 		if !info.Mode().IsRegular() {
 			return nil
@@ -509,12 +530,45 @@ func copyRestoreTree(source, destination string) error {
 		if inputCloseErr != nil {
 			return inputCloseErr
 		}
-		return closeErr
+		if closeErr != nil {
+			return closeErr
+		}
+		return applyRestoreMetadata(target, info)
 	})
+	if err != nil {
+		return err
+	}
+	for i := len(directories) - 1; i >= 0; i-- {
+		if err = applyRestoreMetadata(directories[i].path, directories[i].info); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyRestoreMetadata(path string, info os.FileInfo) error {
+	if err := os.Chmod(path, info.Mode()); err != nil {
+		return err
+	}
+	if err := applyRestoreOwner(path, info, false); err != nil {
+		return err
+	}
+	return os.Chtimes(path, info.ModTime(), info.ModTime())
 }
 
 func shouldSkipRestorePath(relative string) bool {
 	clean := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(relative)), "./")
+	// The parent must remain traversable or filepath.Walk would skip the
+	// persistent named-volume subtree together with Docker's runtime data.
+	if clean == "var/lib/docker" {
+		return false
+	}
+	if clean == "var/lib/docker/volumes" || strings.HasPrefix(clean, "var/lib/docker/volumes/") {
+		return false
+	}
+	if strings.HasPrefix(clean, "var/lib/docker/") {
+		return true
+	}
 	for _, excluded := range []string{
 		".vbakup",
 		"etc/vbakup",
@@ -525,6 +579,28 @@ func shouldSkipRestorePath(relative string) bool {
 		"etc/systemd/system/vbakup-agent-update.service",
 		"etc/systemd/system/vbakup-agent-update.timer",
 		"etc/init.d/vbakup-agent",
+		"etc/ssh",
+		"etc/network",
+		"etc/netplan",
+		"etc/systemd/network",
+		"etc/cloud",
+		"etc/udev",
+		"etc/machine-id",
+		"etc/hostname",
+		"etc/hosts",
+		"etc/resolv.conf",
+		"etc/fstab",
+		"lib/systemd/system",
+		"usr/lib/systemd/system",
+		"var/lib/apt",
+		"var/lib/dpkg",
+		"var/lib/systemd",
+		"var/lib/containerd",
+		"var/lib/cloud",
+		"var/lib/private",
+		"var/lib/ucf",
+		"var/lib/polkit-1",
+		"var/lib/dbus",
 	} {
 		if clean == excluded || strings.HasPrefix(clean, excluded+"/") {
 			return true

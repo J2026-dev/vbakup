@@ -83,3 +83,18 @@ func TestRestorableServicesSupportsLegacySingBoxManifest(t *testing.T) {
 		t.Fatalf("services=%+v", services)
 	}
 }
+
+func TestRestorableServicesStartsDockerFirst(t *testing.T) {
+	manifest := Manifest{Version: 2, Discovery: Discovery{Services: []Service{
+		{Name: "Komari Agent", Manager: "systemd", Unit: "komari-agent", WasActive: true},
+		{Name: "PostgreSQL", Kind: "database", Manager: "systemd", Unit: "postgresql", WasActive: true},
+		{Name: "Docker", Kind: "container", Runtime: "docker", Manager: "systemd", Unit: "docker", WasActive: true},
+	}}}
+	services := restorableServices(manifest)
+	if len(services) != 3 {
+		t.Fatalf("services=%+v", services)
+	}
+	if services[0].Unit != "docker" || services[1].Unit != "postgresql" || services[2].Unit != "komari-agent" {
+		t.Fatalf("unexpected restore order: %+v", services)
+	}
+}

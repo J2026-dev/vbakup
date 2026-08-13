@@ -19,28 +19,30 @@ type Settings struct {
 }
 
 type Node struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	Note             string    `json:"note,omitempty"`
-	TokenHash        string    `json:"token_hash,omitempty"`
-	Status           string    `json:"status"`
-	IPAddress        string    `json:"ip_address,omitempty"`
-	LastSeen         time.Time `json:"last_seen"`
-	OS               string    `json:"os,omitempty"`
-	Architecture     string    `json:"architecture,omitempty"`
-	Services         []string  `json:"services,omitempty"`
-	DiscoveredPaths  []string  `json:"discovered_paths,omitempty"`
-	AgentVersion     string    `json:"agent_version,omitempty"`
-	AutoUpdate       bool      `json:"auto_update"`
-	UptimeSeconds    int64     `json:"uptime_seconds,omitempty"`
-	Load1            float64   `json:"load_1,omitempty"`
-	MemoryTotal      uint64    `json:"memory_total,omitempty"`
-	MemoryUsed       uint64    `json:"memory_used,omitempty"`
-	DiskTotal        uint64    `json:"disk_total,omitempty"`
-	DiskUsed         uint64    `json:"disk_used,omitempty"`
-	DockerContainers int       `json:"docker_containers,omitempty"`
-	ShortcutCommands []string  `json:"shortcut_commands,omitempty"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID                 string    `json:"id"`
+	Name               string    `json:"name"`
+	Note               string    `json:"note,omitempty"`
+	TokenHash          string    `json:"token_hash,omitempty"`
+	ReconnectTokenHash string    `json:"reconnect_token_hash,omitempty"`
+	ReconnectExpiresAt time.Time `json:"reconnect_expires_at,omitempty"`
+	Status             string    `json:"status"`
+	IPAddress          string    `json:"ip_address,omitempty"`
+	LastSeen           time.Time `json:"last_seen"`
+	OS                 string    `json:"os,omitempty"`
+	Architecture       string    `json:"architecture,omitempty"`
+	Services           []string  `json:"services,omitempty"`
+	DiscoveredPaths    []string  `json:"discovered_paths,omitempty"`
+	AgentVersion       string    `json:"agent_version,omitempty"`
+	AutoUpdate         bool      `json:"auto_update"`
+	UptimeSeconds      int64     `json:"uptime_seconds,omitempty"`
+	Load1              float64   `json:"load_1,omitempty"`
+	MemoryTotal        uint64    `json:"memory_total,omitempty"`
+	MemoryUsed         uint64    `json:"memory_used,omitempty"`
+	DiskTotal          uint64    `json:"disk_total,omitempty"`
+	DiskUsed           uint64    `json:"disk_used,omitempty"`
+	DockerContainers   int       `json:"docker_containers,omitempty"`
+	ShortcutCommands   []string  `json:"shortcut_commands,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 type Repository struct {
