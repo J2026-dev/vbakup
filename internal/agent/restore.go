@@ -10,9 +10,12 @@ import (
 
 func StopServices(manifest Manifest) []string {
 	var warnings []string
-	for _, unit := range serviceUnits(manifest) {
-		if err := exec.Command("systemctl", "stop", unit).Run(); err != nil {
-			warnings = append(warnings, fmt.Sprintf("stop %s: %v", unit, err))
+	for _, service := range restorableServices(manifest) {
+		if manifest.Version >= 2 && !service.WasActive {
+			continue
+		}
+		if err := serviceCommand(service.Manager, "stop", service.Unit); err != nil {
+			warnings = append(warnings, fmt.Sprintf("stop %s: %v", service.Unit, err))
 		}
 	}
 	return warnings
@@ -32,9 +35,23 @@ func RestoreServices(metadataRoot, destinationRoot string, manifest Manifest) []
 		}
 	}
 
-	for _, unit := range serviceUnits(manifest) {
-		if err := exec.Command("systemctl", "restart", unit).Run(); err != nil {
-			warnings = append(warnings, fmt.Sprintf("restart %s: %v", unit, err))
+	services := restorableServices(manifest)
+	if containsManager(services, "systemd") {
+		if output, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+			warnings = append(warnings, fmt.Sprintf("systemd daemon-reload: %v: %s", err, strings.TrimSpace(string(output))))
+		}
+	}
+	for _, service := range services {
+		if manifest.Version >= 2 && service.WasEnabled {
+			if err := serviceCommand(service.Manager, "enable", service.Unit); err != nil {
+				warnings = append(warnings, fmt.Sprintf("enable %s: %v", service.Unit, err))
+			}
+		}
+		if manifest.Version >= 2 && !service.WasActive {
+			continue
+		}
+		if err := serviceCommand(service.Manager, "restart", service.Unit); err != nil {
+			warnings = append(warnings, fmt.Sprintf("restart %s: %v", service.Unit, err))
 		}
 	}
 	for _, project := range manifest.Discovery.ComposeProjects {
@@ -108,15 +125,52 @@ func restoreComposeMetadata(source, destination string) error {
 	return nil
 }
 
-func serviceUnits(manifest Manifest) []string {
-	units := map[string]string{"Docker": "docker", "Xray": "xray", "Komari Agent": "komari-agent", "Cloudreve": "cloudreve", "MySQL": "mysql", "PostgreSQL": "postgresql", "Redis": "redis-server", "Nginx": "nginx"}
-	var result []string
+func restorableServices(manifest Manifest) []Service {
+	legacyUnits := map[string]string{"1Panel": "1panel", "Docker": "docker", "Xray": "xray", "sing-box": "sing-box", "Komari Agent": "komari-agent", "Cloudreve": "cloudreve", "MySQL": "mysql", "PostgreSQL": "postgresql", "Redis": "redis-server", "Nginx": "nginx"}
+	seen := map[string]bool{}
+	var result []Service
 	for _, service := range manifest.Discovery.Services {
-		if unit := units[service.Name]; unit != "" {
-			result = append(result, unit)
+		if service.Unit == "" {
+			service.Unit = legacyUnits[service.Name]
+		}
+		if service.Manager == "" && service.Unit != "" {
+			service.Manager = "systemd"
+		}
+		key := service.Manager + "\x00" + service.Unit
+		if service.Unit != "" && !seen[key] {
+			seen[key] = true
+			result = append(result, service)
 		}
 	}
 	return result
+}
+
+func containsManager(services []Service, manager string) bool {
+	for _, service := range services {
+		if service.Manager == manager {
+			return true
+		}
+	}
+	return false
+}
+
+func serviceCommand(manager, action, unit string) error {
+	var command *exec.Cmd
+	switch manager {
+	case "openrc":
+		if action == "enable" {
+			command = exec.Command("rc-update", "add", unit, "default")
+		} else {
+			command = exec.Command("rc-service", unit, action)
+		}
+	default:
+		command = exec.Command("systemctl", action, unit)
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 func contains(values []string, target string) bool {
 	for _, value := range values {

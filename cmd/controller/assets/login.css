@@ -1,0 +1,45 @@
+.login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f3f6fa;
+}
+
+.login-screen[hidden],
+#app-root[hidden] {
+  display: none;
+}
+
+.login-panel {
+  width: min(380px, 100%);
+  padding: 30px;
+  border: 1px solid #dbe3ed;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 32px #10182814;
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 32px;
+  font-size: 19px;
+}
+
+.login-panel h1 {
+  margin: 0 0 22px;
+  font-size: 22px;
+}
+
+.login-panel .primary {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.login-error {
+  min-height: 20px;
+  margin: 8px 0 0;
+  color: #d92d20;
+}

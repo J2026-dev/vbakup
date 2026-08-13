@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -63,10 +64,12 @@ type repositoryUsageView struct {
 func (s *server) routes() http.Handler {
 	mux := http.NewServeMux()
 	web, _ := fs.Sub(assets, "assets")
-	mux.Handle("GET /", s.admin(http.FileServer(http.FS(web))))
+	mux.Handle("GET /", http.FileServer(http.FS(web)))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	mux.Handle("POST /api/login", http.HandlerFunc(s.handleLogin))
+	mux.Handle("POST /api/logout", s.admin(http.HandlerFunc(s.handleLogout)))
 	mux.Handle("GET /api/state", s.admin(http.HandlerFunc(s.handleState)))
 	mux.Handle("PATCH /api/nodes/{id}", s.admin(http.HandlerFunc(s.handleUpdateNode)))
 	mux.Handle("POST /api/nodes/{id}/auto-update", s.admin(http.HandlerFunc(s.handleNodeAutoUpdate)))
@@ -95,15 +98,10 @@ func (s *server) admin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.validSession(r) {
 			u, p, ok := r.BasicAuth()
-			s.authMu.RLock()
-			adminUser, adminPassword := s.adminUser, s.adminPassword
-			s.authMu.RUnlock()
-			if !ok || subtle.ConstantTimeCompare([]byte(u), []byte(adminUser)) != 1 || subtle.ConstantTimeCompare([]byte(p), []byte(adminPassword)) != 1 {
-				w.Header().Set("WWW-Authenticate", `Basic realm="vBakup"`)
-				http.Error(w, "authentication required", http.StatusUnauthorized)
+			if !ok || !s.validAdminCredentials(u, p) {
+				writeError(w, http.StatusUnauthorized, "请先登录")
 				return
 			}
-			s.issueSession(w)
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			if origin := r.Header.Get("Origin"); origin != "" {
@@ -117,6 +115,36 @@ func (s *server) admin(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *server) validAdminCredentials(username, password string) bool {
+	s.authMu.RLock()
+	adminUser, adminPassword := s.adminUser, s.adminPassword
+	s.authMu.RUnlock()
+	return subtle.ConstantTimeCompare([]byte(username), []byte(adminUser)) == 1 && subtle.ConstantTimeCompare([]byte(password), []byte(adminPassword)) == 1
+}
+
+func (s *server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if decodeJSON(r, &input) != nil || !s.validAdminCredentials(input.Username, input.Password) {
+		writeError(w, http.StatusUnauthorized, "用户名或密码错误")
+		return
+	}
+	s.issueSession(w)
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie("vbakup_session"); err == nil {
+		s.authMu.Lock()
+		delete(s.sessions, cookie.Value)
+		s.authMu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{Name: "vbakup_session", Value: "", Path: "/", HttpOnly: true, Secure: strings.HasPrefix(s.publicURL, "https://"), SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *server) validSession(r *http.Request) bool {
@@ -647,7 +675,7 @@ func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		in.Name = "unnamed-node"
 	}
 	token := randomToken(32)
-	node := model.Node{ID: id.New("node"), Name: in.Name, TokenHash: hashToken(token), Status: "online", LastSeen: time.Now().UTC(), OS: in.OS, Architecture: in.Architecture, AgentVersion: in.AgentVersion, CreatedAt: time.Now().UTC()}
+	node := model.Node{ID: id.New("node"), Name: in.Name, TokenHash: hashToken(token), Status: "online", IPAddress: requestClientIP(r), LastSeen: time.Now().UTC(), OS: in.OS, Architecture: in.Architecture, AgentVersion: in.AgentVersion, CreatedAt: time.Now().UTC()}
 	if s.store.Update(func(st *model.State) error { st.Nodes = append(st.Nodes, node); return nil }) != nil {
 		writeError(w, 500, "注册失败")
 		return
@@ -679,6 +707,7 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		DiscoveredPaths  []string `json:"discovered_paths"`
 		DockerContainers int      `json:"docker_containers"`
 		AutoUpdate       bool     `json:"auto_update"`
+		ShortcutCommands []string `json:"shortcut_commands"`
 		Resources        struct {
 			UptimeSeconds int64   `json:"uptime_seconds"`
 			Load1         float64 `json:"load_1"`
@@ -704,6 +733,8 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 				st.Nodes[i].DiscoveredPaths = in.DiscoveredPaths
 				st.Nodes[i].DockerContainers = in.DockerContainers
 				st.Nodes[i].AutoUpdate = in.AutoUpdate
+				st.Nodes[i].IPAddress = requestClientIP(r)
+				st.Nodes[i].ShortcutCommands = in.ShortcutCommands
 				st.Nodes[i].UptimeSeconds = in.Resources.UptimeSeconds
 				st.Nodes[i].Load1 = in.Resources.Load1
 				st.Nodes[i].MemoryTotal = in.Resources.MemoryTotal
@@ -715,6 +746,32 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	writeJSON(w, 200, map[string]bool{"ok": true})
+}
+
+func requestClientIP(r *http.Request) string {
+	for _, candidate := range []string{r.Header.Get("CF-Connecting-IP"), r.Header.Get("True-Client-IP"), firstForwardedIP(r.Header.Get("X-Forwarded-For"))} {
+		candidate = strings.TrimSpace(candidate)
+		if parsed := net.ParseIP(candidate); parsed != nil {
+			return parsed.String()
+		}
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil {
+		if parsed := net.ParseIP(host); parsed != nil {
+			return parsed.String()
+		}
+	}
+	if parsed := net.ParseIP(strings.TrimSpace(r.RemoteAddr)); parsed != nil {
+		return parsed.String()
+	}
+	return ""
+}
+
+func firstForwardedIP(value string) string {
+	if first, _, ok := strings.Cut(value, ","); ok {
+		return first
+	}
+	return value
 }
 
 func (s *server) handleCommands(w http.ResponseWriter, r *http.Request) {

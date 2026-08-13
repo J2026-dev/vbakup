@@ -31,6 +31,73 @@ func newTestServer(t *testing.T) (*server, *store.Store) {
 	return &server{store: state, vault: secrets, publicURL: "https://backup.example.com", bootstrapSecret: "test-secret"}, state
 }
 
+func TestAdminLoginUsesFormSessionWithoutBasicAuthChallenge(t *testing.T) {
+	app, _ := newTestServer(t)
+	app.adminUser = "admin"
+	app.adminPassword = "test-password"
+	app.sessions = map[string]uint64{}
+	handler := app.routes()
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/state", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status=%d body=%s", unauthorized.Code, unauthorized.Body.String())
+	}
+	if challenge := unauthorized.Header().Get("WWW-Authenticate"); challenge != "" {
+		t.Fatalf("unexpected browser auth challenge %q", challenge)
+	}
+
+	badLogin := httptest.NewRecorder()
+	handler.ServeHTTP(badLogin, httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"admin","password":"wrong"}`)))
+	if badLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("bad login status=%d body=%s", badLogin.Code, badLogin.Body.String())
+	}
+
+	login := httptest.NewRecorder()
+	handler.ServeHTTP(login, httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"admin","password":"test-password"}`)))
+	if login.Code != http.StatusOK || len(login.Result().Cookies()) != 1 {
+		t.Fatalf("login status=%d cookies=%v body=%s", login.Code, login.Result().Cookies(), login.Body.String())
+	}
+	cookie := login.Result().Cookies()[0]
+	if cookie.Name != "vbakup_session" || cookie.Value == "" || !cookie.HttpOnly {
+		t.Fatalf("invalid session cookie: %+v", cookie)
+	}
+
+	authorizedRequest := httptest.NewRequest(http.MethodGet, "/api/state", nil)
+	authorizedRequest.AddCookie(cookie)
+	authorized := httptest.NewRecorder()
+	handler.ServeHTTP(authorized, authorizedRequest)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status=%d body=%s", authorized.Code, authorized.Body.String())
+	}
+
+	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	logoutRequest.AddCookie(cookie)
+	logout := httptest.NewRecorder()
+	handler.ServeHTTP(logout, logoutRequest)
+	if logout.Code != http.StatusOK || len(app.sessions) != 0 {
+		t.Fatalf("logout status=%d sessions=%v", logout.Code, app.sessions)
+	}
+}
+
+func TestRequestClientIPUsesValidatedProxyHeaders(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/agent/node/heartbeat", nil)
+	request.RemoteAddr = "192.0.2.20:41300"
+	request.Header.Set("CF-Connecting-IP", "203.0.113.10")
+	request.Header.Set("X-Forwarded-For", "198.51.100.4, 192.0.2.1")
+	if got := requestClientIP(request); got != "203.0.113.10" {
+		t.Fatalf("CF client IP=%q", got)
+	}
+	request.Header.Set("CF-Connecting-IP", "not-an-ip")
+	if got := requestClientIP(request); got != "198.51.100.4" {
+		t.Fatalf("forwarded client IP=%q", got)
+	}
+	request.Header.Del("X-Forwarded-For")
+	if got := requestClientIP(request); got != "192.0.2.20" {
+		t.Fatalf("remote client IP=%q", got)
+	}
+}
+
 func TestStateUsesEmptyArraysAndIncludesInstallCommand(t *testing.T) {
 	app, _ := newTestServer(t)
 	response := httptest.NewRecorder()

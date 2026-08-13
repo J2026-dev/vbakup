@@ -44,7 +44,7 @@ func CreateArchive(destination string, configured []string, includeDocker, inclu
 func createArchive(destination string, configured []string, includeDocker, includeDatabases bool, discovery Discovery) (Manifest, error) {
 	paths := cleanAbsolutePaths(append(append([]string{}, configured...), discovery.Paths...))
 	host, _ := os.Hostname()
-	manifest := Manifest{Version: 1, CreatedAt: time.Now().UTC(), Hostname: host, Discovery: discovery, Paths: paths}
+	manifest := Manifest{Version: 2, CreatedAt: time.Now().UTC(), Hostname: host, Discovery: discovery, Paths: paths}
 	stage, err := os.MkdirTemp("", "vbakup-stage-")
 	if err != nil {
 		return manifest, err

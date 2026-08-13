@@ -89,7 +89,7 @@ func (a *app) loop() {
 func (a *app) cycle() error {
 	discovery := agentlib.Discover()
 	resources := collectResources()
-	if err := a.post("/api/agent/"+a.config.NodeID+"/heartbeat", map[string]any{"os": runtime.GOOS, "architecture": runtime.GOARCH, "agent_version": version, "services": agentlib.ServiceNames(discovery), "discovered_paths": discovery.Paths, "docker_containers": len(discovery.DockerContainers), "auto_update": a.config.AutoUpdate, "resources": resources}, nil); err != nil {
+	if err := a.post("/api/agent/"+a.config.NodeID+"/heartbeat", map[string]any{"os": runtime.GOOS, "architecture": runtime.GOARCH, "agent_version": version, "services": agentlib.ServiceNames(discovery), "discovered_paths": discovery.Paths, "docker_containers": len(discovery.DockerContainers), "shortcut_commands": agentlib.ShortcutNames(discovery), "auto_update": a.config.AutoUpdate, "resources": resources}, nil); err != nil {
 		return err
 	}
 	var response struct {
@@ -251,7 +251,7 @@ func (a *app) backup(command model.Command) model.CommandResult {
 	if len(manifest.Warnings) > 0 {
 		message = fmt.Sprintf("backup uploaded with %d warning(s)", len(manifest.Warnings))
 	}
-	return model.CommandResult{Status: "success", Message: message, Details: map[string]any{"discovered_paths": manifest.Paths, "discovered_services": agentlib.ServiceNames(manifest.Discovery), "files": manifest.Files, "bytes": manifest.Bytes, "warnings": manifest.Warnings}, Backup: &model.Backup{RepositoryID: command.Task.RepositoryID, RemotePath: remote, Size: size, SHA256: hash, Services: agentlib.ServiceNames(manifest.Discovery), Files: manifest.Files, ArchiveBytes: manifest.Bytes, Warnings: manifest.Warnings}}
+	return model.CommandResult{Status: "success", Message: message, Details: map[string]any{"manifest_version": manifest.Version, "discovered_paths": manifest.Paths, "discovered_services": manifest.Discovery.Services, "shortcut_commands": manifest.Discovery.ShortcutCommands, "files": manifest.Files, "bytes": manifest.Bytes, "warnings": manifest.Warnings}, Backup: &model.Backup{RepositoryID: command.Task.RepositoryID, RemotePath: remote, Size: size, SHA256: hash, Services: agentlib.ServiceNames(manifest.Discovery), ShortcutCommands: agentlib.ShortcutNames(manifest.Discovery), Files: manifest.Files, ArchiveBytes: manifest.Bytes, Warnings: manifest.Warnings}}
 }
 
 func downloadVerified(dav *webdav.Client, remote, destination, expectedHash string, expectedSize int64, timeout time.Duration) (string, int64, error) {

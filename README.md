@@ -10,7 +10,7 @@
 
 - 一个主控管理所有 VPS，提供节点、WebDAV、计划、备份和恢复视图。
 - 一条命令安装 agent，注册后由 systemd 常驻，无需后续手工配对。
-- 自动识别 1Panel、Docker、Xray、Komari Agent、Cloudreve、MySQL、PostgreSQL、Redis、Nginx 及常用数据目录。
+- 自动识别 1Panel、Docker、Xray、sing-box、Komari Agent、Cloudreve、MySQL、PostgreSQL、Redis、Nginx 及常用数据目录。
 - 数据库优先执行逻辑一致性导出；Docker 保存 inspect、Compose、原工作目录和 `.env` 元数据。
 - 支持每小时、每 6 小时、每 12 小时、每天、每周以及 API 自定义 Go duration（最短 15 分钟）。
 - 备份上传前记录 SHA-256；恢复下载后强制复验，归档解包防路径穿越。
@@ -20,6 +20,9 @@
 - WebDAV 密码由主控本地 AES-GCM 主密钥加密；agent token 仅保存 SHA-256 哈希。
 - 被控只发起 `443/tcp` 出站请求，可置于 NAT、防火墙或 Cloudflare 代理之后。
 - 主控页面每 10 秒静默同步节点、策略和快照状态，切回页面时也会立即刷新，无需手动重新加载。
+- 使用站内登录页面和 HttpOnly 会话 Cookie，不再触发浏览器 Basic Auth 弹窗；可在面板退出、修改密码或撤销全部旧会话。
+- 节点列表和详情显示 agent 最近一次心跳的来源 IP；经 Cloudflare 时优先读取 `CF-Connecting-IP`，其次使用标准代理转发地址和连接地址。
+- 快照 manifest v2 记录识别到的服务、服务管理器、unit、备份前启用/运行状态以及系统快捷命令清单。
 
 ## 架构
 
@@ -144,6 +147,10 @@ vbakup-agentctl uninstall
 
 恢复时会自动跳过 vBakup agent 自身的二进制、配置、结果缓存和 systemd/OpenRC 单元，避免正在运行的 agent 被覆盖而触发 `text file busy`。旧版本创建的快照也使用相同的跳过规则，可以直接恢复。
 
+新快照会保存 systemd/OpenRC 服务的实际 unit、备份前运行状态和启用状态。恢复时先还原 unit 与数据，再执行 systemd `daemon-reload`，重新启用原本启用的服务，并只重启备份前正在运行的服务；sing-box、Xray、1Panel 等使用同一套恢复流程。旧 manifest 仍按内置服务映射兼容恢复。
+
+agent 还会扫描 `/usr/local/bin`、`/usr/local/sbin`、用户 `.local/bin` 及常见 shell profile，记录自定义可执行文件、符号链接和 alias 名称。处于用户/本地命令目录及 profile 中的内容会随文件归档恢复；清单只记录 alias 名称和来源文件，恢复过程不会主动执行 alias 内容。系统发行版管理的 `/usr/bin` 不作为自定义快捷命令恢复来源。
+
 ## Cloudflare 小云朵
 
 主控域名可以打开 Cloudflare 代理：
@@ -167,7 +174,7 @@ agent 不允许跳过 TLS 校验。需要改变连接方式时，推荐在主控
 - 必须备份主控的 `data/state.json` 和 `data/master.key`；缺少主密钥将无法解密 WebDAV 密码。
 - 注册命令含 bootstrap secret，不要贴到 issue、日志或聊天群；节点全部接入后可更换该密钥并重启主控。
 - 使用专用 WebDAV 账号和独立目录，启用服务端版本控制/对象锁（若提供）。
-- 主控 Basic Auth 应放在 HTTPS 后；更高安全要求可在前面叠加 Cloudflare Access/OIDC。
+- 主控登录页必须放在 HTTPS 后；更高安全要求可在前面叠加 Cloudflare Access/OIDC。
 - agent 为读取系统数据和执行恢复而以 root 运行。只把主控部署在受信任环境，严格保护主控账户。
 - 每月至少做一次隔离恢复演练。只有被实际恢复并验证过的备份才可信。
 

@@ -160,6 +160,9 @@ func TestArchiveManifestIncludesDiscoveredAndConfiguredData(t *testing.T) {
 	if manifest.Files < 2 || manifest.Bytes < int64(len("service=true\nstarted\n")) {
 		t.Fatalf("manifest=%+v", manifest)
 	}
+	if manifest.Version != 2 {
+		t.Fatalf("manifest version=%d, want 2", manifest.Version)
+	}
 	if len(manifest.Paths) != 2 {
 		t.Fatalf("paths=%v", manifest.Paths)
 	}
@@ -178,6 +181,9 @@ func TestArchiveManifestIncludesDiscoveredAndConfiguredData(t *testing.T) {
 	}
 	if archivedManifest.Files < 2 || archivedManifest.Bytes < int64(len("service=true\nstarted\n")) {
 		t.Fatalf("archived manifest=%+v", archivedManifest)
+	}
+	if archivedManifest.Version != 2 {
+		t.Fatalf("archived manifest version=%d, want 2", archivedManifest.Version)
 	}
 	for _, item := range []struct{ root, name string }{{root, "app.conf"}, {discovered, "app.log"}} {
 		if _, err := os.Stat(filepath.Join(extracted, filepath.FromSlash(strings.TrimPrefix(filepath.ToSlash(item.root), "/")), item.name)); err != nil {

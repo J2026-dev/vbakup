@@ -67,3 +67,19 @@ func TestRestoreComposeMetadataToOriginalDirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestRestorableServicesPreserveManifestV2State(t *testing.T) {
+	manifest := Manifest{Version: 2, Discovery: Discovery{Services: []Service{{Name: "sing-box", Manager: "systemd", Unit: "sing-box", WasActive: true, WasEnabled: true}}}}
+	services := restorableServices(manifest)
+	if len(services) != 1 || services[0].Unit != "sing-box" || !services[0].WasActive || !services[0].WasEnabled {
+		t.Fatalf("services=%+v", services)
+	}
+}
+
+func TestRestorableServicesSupportsLegacySingBoxManifest(t *testing.T) {
+	manifest := Manifest{Version: 1, Discovery: Discovery{Services: []Service{{Name: "sing-box"}}}}
+	services := restorableServices(manifest)
+	if len(services) != 1 || services[0].Manager != "systemd" || services[0].Unit != "sing-box" {
+		t.Fatalf("services=%+v", services)
+	}
+}

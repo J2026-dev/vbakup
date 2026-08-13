@@ -24,6 +24,7 @@ type Node struct {
 	Note             string    `json:"note,omitempty"`
 	TokenHash        string    `json:"token_hash,omitempty"`
 	Status           string    `json:"status"`
+	IPAddress        string    `json:"ip_address,omitempty"`
 	LastSeen         time.Time `json:"last_seen"`
 	OS               string    `json:"os,omitempty"`
 	Architecture     string    `json:"architecture,omitempty"`
@@ -38,6 +39,7 @@ type Node struct {
 	DiskTotal        uint64    `json:"disk_total,omitempty"`
 	DiskUsed         uint64    `json:"disk_used,omitempty"`
 	DockerContainers int       `json:"docker_containers,omitempty"`
+	ShortcutCommands []string  `json:"shortcut_commands,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 }
 
@@ -92,19 +94,20 @@ type CommandResult struct {
 }
 
 type Backup struct {
-	ID           string    `json:"id"`
-	TaskID       string    `json:"task_id"`
-	NodeID       string    `json:"node_id"`
-	NodeName     string    `json:"node_name,omitempty"`
-	RepositoryID string    `json:"repository_id"`
-	RemotePath   string    `json:"remote_path"`
-	Size         int64     `json:"size"`
-	SHA256       string    `json:"sha256"`
-	Services     []string  `json:"services,omitempty"`
-	Files        int64     `json:"files,omitempty"`
-	ArchiveBytes int64     `json:"archive_bytes,omitempty"`
-	Warnings     []string  `json:"warnings,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID               string    `json:"id"`
+	TaskID           string    `json:"task_id"`
+	NodeID           string    `json:"node_id"`
+	NodeName         string    `json:"node_name,omitempty"`
+	RepositoryID     string    `json:"repository_id"`
+	RemotePath       string    `json:"remote_path"`
+	Size             int64     `json:"size"`
+	SHA256           string    `json:"sha256"`
+	Services         []string  `json:"services,omitempty"`
+	ShortcutCommands []string  `json:"shortcut_commands,omitempty"`
+	Files            int64     `json:"files,omitempty"`
+	ArchiveBytes     int64     `json:"archive_bytes,omitempty"`
+	Warnings         []string  `json:"warnings,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type Operation struct {
