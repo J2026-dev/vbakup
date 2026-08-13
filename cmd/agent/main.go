@@ -463,8 +463,14 @@ func copyRestoreTree(source, destination string) error {
 			return walkErr
 		}
 		relative, err := filepath.Rel(source, current)
-		if err != nil || relative == "." || strings.HasPrefix(relative, ".vbakup") {
+		if err != nil || relative == "." {
 			return err
+		}
+		if shouldSkipRestorePath(relative) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		target := filepath.Join(destination, relative)
 		if info.IsDir() {
@@ -505,4 +511,24 @@ func copyRestoreTree(source, destination string) error {
 		}
 		return closeErr
 	})
+}
+
+func shouldSkipRestorePath(relative string) bool {
+	clean := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(relative)), "./")
+	for _, excluded := range []string{
+		".vbakup",
+		"etc/vbakup",
+		"var/lib/vbakup",
+		"usr/local/bin/vbakup-agent",
+		"usr/local/bin/vbakup-agentctl",
+		"etc/systemd/system/vbakup-agent.service",
+		"etc/systemd/system/vbakup-agent-update.service",
+		"etc/systemd/system/vbakup-agent-update.timer",
+		"etc/init.d/vbakup-agent",
+	} {
+		if clean == excluded || strings.HasPrefix(clean, excluded+"/") {
+			return true
+		}
+	}
+	return false
 }

@@ -105,3 +105,34 @@ func TestCommandResultsPersistAcrossRestart(t *testing.T) {
 		t.Fatal("reported result was not removed")
 	}
 }
+
+func TestCopyRestoreTreeSkipsAgentSelfFiles(t *testing.T) {
+	source := t.TempDir()
+	destination := t.TempDir()
+	files := map[string]string{
+		"usr/local/bin/vbakup-agent":     "old-agent",
+		"etc/vbakup/agent.json":          "old-token",
+		"var/lib/vbakup/results.json":    "old-results",
+		"etc/my-service/application.ini": "restored=true",
+	}
+	for name, content := range files {
+		path := filepath.Join(source, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := copyRestoreTree(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(destination, "etc", "my-service", "application.ini")); err != nil || string(data) != "restored=true" {
+		t.Fatalf("application file was not restored: data=%q err=%v", data, err)
+	}
+	for _, name := range []string{"usr/local/bin/vbakup-agent", "etc/vbakup/agent.json", "var/lib/vbakup/results.json"} {
+		if _, err := os.Stat(filepath.Join(destination, filepath.FromSlash(name))); !os.IsNotExist(err) {
+			t.Fatalf("self-managed path was restored: %s err=%v", name, err)
+		}
+	}
+}

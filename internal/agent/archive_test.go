@@ -185,3 +185,20 @@ func TestArchiveManifestIncludesDiscoveredAndConfiguredData(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentSelfFilesAreExcluded(t *testing.T) {
+	for _, path := range []string{
+		"/usr/local/bin/vbakup-agent",
+		"/usr/local/bin/vbakup-agentctl",
+		"/etc/vbakup/agent.json",
+		"/var/lib/vbakup/results.json",
+		"/etc/systemd/system/vbakup-agent.service",
+	} {
+		if !isExcluded(path) {
+			t.Fatalf("agent self-managed path is not excluded: %s", path)
+		}
+	}
+	if isExcluded("/etc/my-service/application.ini") {
+		t.Fatal("ordinary application data was excluded")
+	}
+}

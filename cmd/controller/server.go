@@ -75,6 +75,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("DELETE /api/repositories/{id}", s.admin(http.HandlerFunc(s.handleDeleteRepository)))
 	mux.Handle("GET /api/repositories/{id}/usage", s.admin(http.HandlerFunc(s.handleRepositoryUsage)))
 	mux.Handle("POST /api/tasks", s.admin(http.HandlerFunc(s.handleCreateTask)))
+	mux.Handle("PATCH /api/tasks/{id}", s.admin(http.HandlerFunc(s.handleUpdateTask)))
 	mux.Handle("DELETE /api/tasks/{id}", s.admin(http.HandlerFunc(s.handleDeleteTask)))
 	mux.Handle("POST /api/tasks/{id}/run", s.admin(http.HandlerFunc(s.handleRunTask)))
 	mux.Handle("POST /api/backups/{id}/restore", s.admin(http.HandlerFunc(s.handleRestore)))
@@ -491,28 +492,77 @@ func (s *server) handleRevokeSessions(w http.ResponseWriter, _ *http.Request) {
 
 func (s *server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	var task model.Task
-	if decodeJSON(r, &task) != nil || strings.TrimSpace(task.Name) == "" || task.NodeID == "" || task.RepositoryID == "" {
-		writeError(w, 400, "任务名称、节点和备份库为必填项")
+	if decodeJSON(r, &task) != nil {
+		writeError(w, 400, "备份策略格式无效")
 		return
 	}
-	state := s.store.Snapshot()
-	if !hasNode(state, task.NodeID) || !hasRepo(state, task.RepositoryID) {
-		writeError(w, 400, "节点或备份库不存在")
-		return
-	}
-	if _, ok := scheduleInterval(task.Schedule); !ok {
-		writeError(w, 400, "不支持的备份频率")
+	if status, message := s.validateTask(&task); status != 0 {
+		writeError(w, status, message)
 		return
 	}
 	task.ID = id.New("task")
-	task.Enabled = true
 	task.CreatedAt = time.Now().UTC()
-	task.Paths = cleanPaths(task.Paths)
 	if err := s.store.Update(func(state *model.State) error { state.Tasks = append(state.Tasks, task); return nil }); err != nil {
 		writeError(w, 500, "保存失败")
 		return
 	}
 	writeJSON(w, 201, task)
+}
+
+func (s *server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
+	var input model.Task
+	if decodeJSON(r, &input) != nil {
+		writeError(w, http.StatusBadRequest, "备份策略格式无效")
+		return
+	}
+	if status, message := s.validateTask(&input); status != 0 {
+		writeError(w, status, message)
+		return
+	}
+	var updated model.Task
+	err := s.store.Update(func(state *model.State) error {
+		for i := range state.Tasks {
+			if state.Tasks[i].ID != r.PathValue("id") {
+				continue
+			}
+			state.Tasks[i].Name = input.Name
+			state.Tasks[i].NodeID = input.NodeID
+			state.Tasks[i].RepositoryID = input.RepositoryID
+			state.Tasks[i].Schedule = input.Schedule
+			state.Tasks[i].Paths = input.Paths
+			state.Tasks[i].IncludeDocker = input.IncludeDocker
+			state.Tasks[i].IncludeDatabases = input.IncludeDatabases
+			state.Tasks[i].Enabled = input.Enabled
+			updated = state.Tasks[i]
+			return nil
+		}
+		return errNotFound
+	})
+	if errors.Is(err, errNotFound) {
+		writeError(w, http.StatusNotFound, "备份策略不存在")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "备份策略保存失败")
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *server) validateTask(task *model.Task) (int, string) {
+	task.Name = strings.TrimSpace(task.Name)
+	task.Paths = cleanPaths(task.Paths)
+	if task.Name == "" || task.NodeID == "" || task.RepositoryID == "" {
+		return http.StatusBadRequest, "任务名称、节点和备份库为必填项"
+	}
+	state := s.store.Snapshot()
+	if !hasNode(state, task.NodeID) || !hasRepo(state, task.RepositoryID) {
+		return http.StatusBadRequest, "节点或备份库不存在"
+	}
+	if _, ok := scheduleInterval(task.Schedule); !ok {
+		return http.StatusBadRequest, "不支持的备份频率"
+	}
+	return 0, ""
 }
 
 func (s *server) handleRunTask(w http.ResponseWriter, r *http.Request) {

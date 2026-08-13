@@ -142,6 +142,8 @@ vbakup-agentctl uninstall
 
 恢复不会自动修改 DNS，也无法可靠重建云厂商安全组、外部密钥、未备份的远端依赖或硬编码旧 IP。完整灾备必须把这些项目纳入演练清单。
 
+恢复时会自动跳过 vBakup agent 自身的二进制、配置、结果缓存和 systemd/OpenRC 单元，避免正在运行的 agent 被覆盖而触发 `text file busy`。旧版本创建的快照也使用相同的跳过规则，可以直接恢复。
+
 ## Cloudflare 小云朵
 
 主控域名可以打开 Cloudflare 代理：

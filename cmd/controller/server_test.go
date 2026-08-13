@@ -301,6 +301,35 @@ func TestConfigureCommandDoesNotRequireRepository(t *testing.T) {
 	}
 }
 
+func TestUpdateTaskPreservesRunHistory(t *testing.T) {
+	app, state := newTestServer(t)
+	lastRun := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	createdAt := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Second)
+	if err := state.Update(func(st *model.State) error {
+		st.Nodes = append(st.Nodes, model.Node{ID: "node-1"}, model.Node{ID: "node-2"})
+		st.Repositories = append(st.Repositories, model.Repository{ID: "repo-1"}, model.Repository{ID: "repo-2"})
+		st.Tasks = append(st.Tasks, model.Task{ID: "task-1", Name: "old", NodeID: "node-1", RepositoryID: "repo-1", Schedule: "@daily", Enabled: true, LastRun: lastRun, LastStatus: "success", LastMessage: "backup uploaded", CreatedAt: createdAt})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"name":"new","node_id":"node-2","repository_id":"repo-2","schedule":"@weekly","paths":["/srv/app"],"include_docker":true,"include_databases":false,"enabled":false}`
+	request := httptest.NewRequest(http.MethodPatch, "/api/tasks/task-1", strings.NewReader(body))
+	request.SetPathValue("id", "task-1")
+	response := httptest.NewRecorder()
+	app.handleUpdateTask(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	updated := state.Snapshot().Tasks[0]
+	if updated.Name != "new" || updated.NodeID != "node-2" || updated.RepositoryID != "repo-2" || updated.Schedule != "@weekly" || updated.Enabled {
+		t.Fatalf("configuration was not updated: %+v", updated)
+	}
+	if !updated.LastRun.Equal(lastRun) || updated.LastStatus != "success" || updated.LastMessage != "backup uploaded" || !updated.CreatedAt.Equal(createdAt) {
+		t.Fatalf("run history was overwritten: %+v", updated)
+	}
+}
+
 func TestRestoreResultCannotCreateBackupOrPanic(t *testing.T) {
 	dataDir := t.TempDir()
 	state, err := store.Open(filepath.Join(dataDir, "state.json"))

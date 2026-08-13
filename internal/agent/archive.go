@@ -29,7 +29,13 @@ type Manifest struct {
 	Bytes         int64     `json:"bytes"`
 }
 
-var excludedPrefixes = []string{"/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/var/cache", "/var/lib/vbakup", "/var/lib/docker/overlay2"}
+var excludedPrefixes = []string{
+	"/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/var/cache",
+	"/etc/vbakup", "/var/lib/vbakup", "/usr/local/bin/vbakup-agent", "/usr/local/bin/vbakup-agentctl",
+	"/etc/systemd/system/vbakup-agent.service", "/etc/systemd/system/vbakup-agent-update.service",
+	"/etc/systemd/system/vbakup-agent-update.timer", "/etc/init.d/vbakup-agent",
+	"/var/lib/docker/overlay2",
+}
 
 func CreateArchive(destination string, configured []string, includeDocker, includeDatabases bool) (Manifest, error) {
 	return createArchive(destination, configured, includeDocker, includeDatabases, Discover())
