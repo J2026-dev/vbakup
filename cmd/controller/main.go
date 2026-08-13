@@ -13,6 +13,8 @@ import (
 	"github.com/J2026-dev/vbakup/internal/vault"
 )
 
+var version = "dev"
+
 func main() {
 	dataDir := env("VBAKUP_DATA", "./data")
 	state, err := store.Open(filepath.Join(dataDir, "state.json"))

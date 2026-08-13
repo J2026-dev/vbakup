@@ -21,6 +21,7 @@ jobs:
           sh -n scripts/install-controller.sh
           sh -n scripts/vbakupctl.sh
           sh -n cmd/controller/assets/install-agent.sh
+          sh -n cmd/controller/assets/vbakup-agentctl.sh
       - name: Validate embedded JavaScript
         run: node --check cmd/controller/assets/app.js
       - name: Validate Compose

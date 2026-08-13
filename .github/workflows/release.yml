@@ -65,7 +65,9 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Build agent
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -trimpath -ldflags="-s -w" -o vbakup-agent-linux-${{ matrix.arch }} ./cmd/agent
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.tag }}
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.arch }} go build -trimpath -ldflags="-s -w -X main.version=${RELEASE_VERSION}" -o vbakup-agent-linux-${{ matrix.arch }} ./cmd/agent
       - name: Create checksum
         run: sha256sum vbakup-agent-linux-${{ matrix.arch }} > vbakup-agent-linux-${{ matrix.arch }}.sha256
       - uses: actions/upload-artifact@v4
@@ -95,6 +97,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: VERSION=${{ needs.prepare.outputs.tag }}
           tags: |
             ghcr.io/j2026-dev/vbakup:latest
             ghcr.io/j2026-dev/vbakup:${{ needs.prepare.outputs.tag }}

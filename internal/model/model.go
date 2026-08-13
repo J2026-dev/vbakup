@@ -13,23 +13,32 @@ type State struct {
 }
 
 type Settings struct {
-	PublicURL             string `json:"public_url"`
+	PublicURL              string `json:"public_url"`
 	AdminPasswordEncrypted string `json:"admin_password_encrypted,omitempty"`
-	AdminSessionEpoch     uint64 `json:"admin_session_epoch,omitempty"`
+	AdminSessionEpoch      uint64 `json:"admin_session_epoch,omitempty"`
 }
 
 type Node struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	Note         string    `json:"note,omitempty"`
-	TokenHash    string    `json:"token_hash,omitempty"`
-	Status       string    `json:"status"`
-	LastSeen     time.Time `json:"last_seen"`
-	OS           string    `json:"os,omitempty"`
-	Architecture string    `json:"architecture,omitempty"`
-	Services     []string  `json:"services,omitempty"`
-	AgentVersion string    `json:"agent_version,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	Note             string    `json:"note,omitempty"`
+	TokenHash        string    `json:"token_hash,omitempty"`
+	Status           string    `json:"status"`
+	LastSeen         time.Time `json:"last_seen"`
+	OS               string    `json:"os,omitempty"`
+	Architecture     string    `json:"architecture,omitempty"`
+	Services         []string  `json:"services,omitempty"`
+	DiscoveredPaths  []string  `json:"discovered_paths,omitempty"`
+	AgentVersion     string    `json:"agent_version,omitempty"`
+	AutoUpdate       bool      `json:"auto_update"`
+	UptimeSeconds    int64     `json:"uptime_seconds,omitempty"`
+	Load1            float64   `json:"load_1,omitempty"`
+	MemoryTotal      uint64    `json:"memory_total,omitempty"`
+	MemoryUsed       uint64    `json:"memory_used,omitempty"`
+	DiskTotal        uint64    `json:"disk_total,omitempty"`
+	DiskUsed         uint64    `json:"disk_used,omitempty"`
+	DockerContainers int       `json:"docker_containers,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type Repository struct {

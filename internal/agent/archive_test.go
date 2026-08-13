@@ -125,20 +125,15 @@ func TestArchivePreservesSymlinkTarget(t *testing.T) {
 }
 
 func TestArchiveManifestIncludesDiscoveredAndConfiguredData(t *testing.T) {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	workspace := t.TempDir()
+	root := filepath.Join(workspace, "configured")
+	discovered := filepath.Join(workspace, "discovered")
+	if err := os.MkdirAll(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	root, err := os.MkdirTemp(home, ".vbakup-configured-test-")
-	if err != nil {
+	if err := os.MkdirAll(discovered, 0700); err != nil {
 		t.Fatal(err)
 	}
-	discovered, err := os.MkdirTemp(home, ".vbakup-discovered-test-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(root)
-	defer os.RemoveAll(discovered)
 	if err := os.WriteFile(filepath.Join(root, "app.conf"), []byte("service=true\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +150,11 @@ func TestArchiveManifestIncludesDiscoveredAndConfiguredData(t *testing.T) {
 	}
 	if len(manifest.Paths) != 2 {
 		t.Fatalf("paths=%v", manifest.Paths)
+	}
+	// Production agents run on Linux. Windows drive-letter paths are not valid
+	// tar paths and extraction behavior is covered by the portable tests above.
+	if runtime.GOOS == "windows" {
+		return
 	}
 	extracted := t.TempDir()
 	if err := ExtractArchive(archive, extracted); err != nil {

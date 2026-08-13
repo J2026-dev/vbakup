@@ -37,12 +37,13 @@ type server struct {
 }
 
 type publicState struct {
-	Nodes          []model.Node      `json:"nodes"`
-	Repositories   []repositoryView  `json:"repositories"`
-	Tasks          []model.Task      `json:"tasks"`
-	Backups        []model.Backup    `json:"backups"`
-	Operations     []model.Operation `json:"operations"`
-	InstallCommand string            `json:"install_command"`
+	Nodes             []model.Node      `json:"nodes"`
+	Repositories      []repositoryView  `json:"repositories"`
+	Tasks             []model.Task      `json:"tasks"`
+	Backups           []model.Backup    `json:"backups"`
+	Operations        []model.Operation `json:"operations"`
+	InstallCommand    string            `json:"install_command"`
+	ControllerVersion string            `json:"controller_version"`
 }
 type repositoryView struct {
 	ID        string    `json:"id"`
@@ -68,6 +69,7 @@ func (s *server) routes() http.Handler {
 	})
 	mux.Handle("GET /api/state", s.admin(http.HandlerFunc(s.handleState)))
 	mux.Handle("PATCH /api/nodes/{id}", s.admin(http.HandlerFunc(s.handleUpdateNode)))
+	mux.Handle("POST /api/nodes/{id}/auto-update", s.admin(http.HandlerFunc(s.handleNodeAutoUpdate)))
 	mux.Handle("DELETE /api/nodes/{id}", s.admin(http.HandlerFunc(s.handleDeleteNode)))
 	mux.Handle("POST /api/repositories", s.admin(http.HandlerFunc(s.handleCreateRepository)))
 	mux.Handle("DELETE /api/repositories/{id}", s.admin(http.HandlerFunc(s.handleDeleteRepository)))
@@ -80,6 +82,7 @@ func (s *server) routes() http.Handler {
 	mux.Handle("POST /api/admin/password", s.admin(http.HandlerFunc(s.handleChangePassword)))
 	mux.Handle("POST /api/admin/sessions/revoke", s.admin(http.HandlerFunc(s.handleRevokeSessions)))
 	mux.Handle("GET /install.sh", http.HandlerFunc(s.handleInstaller))
+	mux.Handle("GET /agentctl.sh", http.HandlerFunc(s.handleAgentctl))
 	mux.Handle("POST /api/agent/register", http.HandlerFunc(s.handleRegister))
 	mux.Handle("POST /api/agent/{node}/heartbeat", http.HandlerFunc(s.handleHeartbeat))
 	mux.Handle("GET /api/agent/{node}/commands", http.HandlerFunc(s.handleCommands))
@@ -157,7 +160,34 @@ func (s *server) handleState(w http.ResponseWriter, _ *http.Request) {
 		Nodes: append([]model.Node{}, state.Nodes...), Repositories: repos,
 		Tasks: append([]model.Task{}, state.Tasks...), Backups: append([]model.Backup{}, state.Backups...),
 		Operations: append([]model.Operation{}, state.Operations...), InstallCommand: command,
+		ControllerVersion: version,
 	})
+}
+
+func (s *server) handleNodeAutoUpdate(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Enabled bool `json:"enabled"`
+	}
+	if decodeJSON(r, &in) != nil {
+		writeError(w, http.StatusBadRequest, "自动升级设置无效")
+		return
+	}
+	nodeID := r.PathValue("id")
+	if !hasNode(s.store.Snapshot(), nodeID) {
+		writeError(w, http.StatusNotFound, "节点不存在")
+		return
+	}
+	operation := model.Operation{ID: id.New("op"), Type: "configure", NodeID: nodeID, Status: "queued", Message: "等待节点应用自动升级设置", CreatedAt: time.Now().UTC()}
+	command := model.Command{ID: id.New("cmd"), NodeID: nodeID, Type: "configure", Payload: map[string]any{"auto_update": in.Enabled, "operation_id": operation.ID}, CreatedAt: time.Now().UTC()}
+	if err := s.store.Update(func(st *model.State) error {
+		st.Commands = append(st.Commands, command)
+		st.Operations = append([]model.Operation{operation}, st.Operations...)
+		return nil
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "无法下发自动升级设置")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, command)
 }
 
 func (s *server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
@@ -544,6 +574,13 @@ func (s *server) handleInstaller(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(script))
 }
 
+func (s *server) handleAgentctl(w http.ResponseWriter, _ *http.Request) {
+	b, _ := assets.ReadFile("assets/vbakup-agentctl.sh")
+	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write(b)
+}
+
 func (s *server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name         string `json:"name"`
@@ -585,10 +622,21 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		OS           string   `json:"os"`
-		Architecture string   `json:"architecture"`
-		AgentVersion string   `json:"agent_version"`
-		Services     []string `json:"services"`
+		OS               string   `json:"os"`
+		Architecture     string   `json:"architecture"`
+		AgentVersion     string   `json:"agent_version"`
+		Services         []string `json:"services"`
+		DiscoveredPaths  []string `json:"discovered_paths"`
+		DockerContainers int      `json:"docker_containers"`
+		AutoUpdate       bool     `json:"auto_update"`
+		Resources        struct {
+			UptimeSeconds int64   `json:"uptime_seconds"`
+			Load1         float64 `json:"load_1"`
+			MemoryTotal   uint64  `json:"memory_total"`
+			MemoryUsed    uint64  `json:"memory_used"`
+			DiskTotal     uint64  `json:"disk_total"`
+			DiskUsed      uint64  `json:"disk_used"`
+		} `json:"resources"`
 	}
 	if decodeJSON(r, &in) != nil {
 		writeError(w, 400, "无效心跳")
@@ -603,6 +651,15 @@ func (s *server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 				st.Nodes[i].Architecture = in.Architecture
 				st.Nodes[i].AgentVersion = in.AgentVersion
 				st.Nodes[i].Services = in.Services
+				st.Nodes[i].DiscoveredPaths = in.DiscoveredPaths
+				st.Nodes[i].DockerContainers = in.DockerContainers
+				st.Nodes[i].AutoUpdate = in.AutoUpdate
+				st.Nodes[i].UptimeSeconds = in.Resources.UptimeSeconds
+				st.Nodes[i].Load1 = in.Resources.Load1
+				st.Nodes[i].MemoryTotal = in.Resources.MemoryTotal
+				st.Nodes[i].MemoryUsed = in.Resources.MemoryUsed
+				st.Nodes[i].DiskTotal = in.Resources.DiskTotal
+				st.Nodes[i].DiskUsed = in.Resources.DiskUsed
 			}
 		}
 		return nil
@@ -633,6 +690,9 @@ func (s *server) handleCommands(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	for i := range commands {
+		if commands[i].Type != "backup" && commands[i].Type != "restore" {
+			continue
+		}
 		if err := s.injectRepositoryCredentials(&commands[i]); err != nil {
 			writeError(w, http.StatusInternalServerError, "无法读取备份库凭据")
 			return

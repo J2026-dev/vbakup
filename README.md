@@ -108,6 +108,19 @@ curl -fsSL https://backup.example.com/install.sh | sudo sh -s -- \
 之后不需要打开端口或继续配置。约 30 秒内节点会出现在控制台。
 重复执行同一安装命令会更新 agent 二进制并保留现有节点身份，不会在控制台创建重复节点。
 
+一键安装还会部署本地 SSH 管理工具。自动升级默认关闭，可在控制台“节点详情”中开启，也可直接在节点执行：
+
+```bash
+vbakup-agentctl status
+vbakup-agentctl logs
+vbakup-agentctl update
+vbakup-agentctl auto-update on
+vbakup-agentctl auto-update off
+vbakup-agentctl uninstall
+```
+
+`uninstall` 会要求输入 `UNINSTALL`，然后删除 agent 服务、节点身份和本地工作数据；WebDAV 备份不会被删除。卸载后可在控制台删除离线节点记录。systemd 节点开启自动升级后每天检查一次最新 Release，并有最多 6 小时的随机延迟，避免所有节点同时下载。
+
 ## 创建备份
 
 1. 在“备份空间”添加 WebDAV 地址、用户名、密码和基础目录。
@@ -171,11 +184,14 @@ docker compose pull && docker compose up -d
 vbakupctl status
 vbakupctl logs
 vbakupctl update
+vbakupctl uninstall
+vbakupctl uninstall --purge
 vbakupctl delete backup BACKUP_ID
 vbakupctl delete node NODE_ID
 ```
 
 `status` 会显示主控容器、Docker 空间、主控数据目录及节点/计划/快照/空间数量。删除命令会提示输入当前管理员密码，并使用与 Web 面板相同的引用保护。
+主控 `uninstall` 默认保留 `/opt/vbakup` 中的数据，`--purge` 会二次确认后永久删除主控配置、凭据和索引，但不会删除 WebDAV 上的备份对象。
 
 ## 开发
 

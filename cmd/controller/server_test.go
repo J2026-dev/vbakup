@@ -272,6 +272,35 @@ func TestCloneCommandDoesNotSharePayload(t *testing.T) {
 	}
 }
 
+func TestConfigureCommandDoesNotRequireRepository(t *testing.T) {
+	app, state := newTestServer(t)
+	token := "agent-token"
+	if err := state.Update(func(st *model.State) error {
+		st.Nodes = append(st.Nodes, model.Node{ID: "node-1", TokenHash: hashToken(token)})
+		st.Commands = append(st.Commands, model.Command{ID: "cmd-1", NodeID: "node-1", Type: "configure", Payload: map[string]any{"auto_update": true}})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/agent/node-1/commands", nil)
+	request.SetPathValue("node", "node-1")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response := httptest.NewRecorder()
+	app.handleCommands(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Commands []model.Command `json:"commands"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Commands) != 1 || body.Commands[0].Type != "configure" {
+		t.Fatalf("commands=%+v", body.Commands)
+	}
+}
+
 func TestRestoreResultCannotCreateBackupOrPanic(t *testing.T) {
 	dataDir := t.TempDir()
 	state, err := store.Open(filepath.Join(dataDir, "state.json"))

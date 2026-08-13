@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -22,15 +23,32 @@ import (
 	"github.com/J2026-dev/vbakup/internal/webdav"
 )
 
-const version = "0.1.0"
+var version = "dev"
+
+var setAutoUpdateTimer = func(enabled bool) error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil
+	}
+	action := "disable"
+	if enabled {
+		action = "enable"
+	}
+	output, err := exec.Command("systemctl", action, "--now", "vbakup-agent-update.timer").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s", strings.TrimSpace(string(output)))
+	}
+	return nil
+}
 
 type config struct {
 	Controller string `json:"controller"`
 	NodeID     string `json:"node_id"`
 	Token      string `json:"token"`
+	AutoUpdate bool   `json:"auto_update"`
 }
 type app struct {
 	config      config
+	configPath  string
 	client      *http.Client
 	resultsPath string
 }
@@ -45,7 +63,7 @@ func main() {
 	if err = json.Unmarshal(data, &cfg); err != nil || cfg.Controller == "" || cfg.NodeID == "" || cfg.Token == "" {
 		log.Fatal("invalid agent config")
 	}
-	runner := &app{config: cfg, resultsPath: env("VBAKUP_RESULTS", "/var/lib/vbakup/results.json"), client: &http.Client{Transport: &http.Transport{
+	runner := &app{config: cfg, configPath: configPath, resultsPath: env("VBAKUP_RESULTS", "/var/lib/vbakup/results.json"), client: &http.Client{Transport: &http.Transport{
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ResponseHeaderTimeout: 90 * time.Second,
@@ -70,7 +88,8 @@ func (a *app) loop() {
 }
 func (a *app) cycle() error {
 	discovery := agentlib.Discover()
-	if err := a.post("/api/agent/"+a.config.NodeID+"/heartbeat", map[string]any{"os": runtime.GOOS, "architecture": runtime.GOARCH, "agent_version": version, "services": agentlib.ServiceNames(discovery)}, nil); err != nil {
+	resources := collectResources()
+	if err := a.post("/api/agent/"+a.config.NodeID+"/heartbeat", map[string]any{"os": runtime.GOOS, "architecture": runtime.GOARCH, "agent_version": version, "services": agentlib.ServiceNames(discovery), "discovered_paths": discovery.Paths, "docker_containers": len(discovery.DockerContainers), "auto_update": a.config.AutoUpdate, "resources": resources}, nil); err != nil {
 		return err
 	}
 	var response struct {
@@ -142,9 +161,38 @@ func (a *app) execute(command model.Command) model.CommandResult {
 		return a.backup(command)
 	case "restore":
 		return a.restore(command)
+	case "configure":
+		return a.configure(command)
 	default:
 		return failure("unknown command: " + command.Type)
 	}
+}
+
+func (a *app) configure(command model.Command) model.CommandResult {
+	enabled, ok := command.Payload["auto_update"].(bool)
+	if !ok {
+		return failure("missing auto_update setting")
+	}
+	a.config.AutoUpdate = enabled
+	data, err := json.MarshalIndent(a.config, "", "  ")
+	if err != nil {
+		return failure("encode agent config: " + err.Error())
+	}
+	if err = os.MkdirAll(filepath.Dir(a.configPath), 0700); err != nil {
+		return failure("prepare agent config: " + err.Error())
+	}
+	temporary := a.configPath + ".tmp"
+	if err = os.WriteFile(temporary, append(data, '\n'), 0600); err != nil {
+		return failure("write agent config: " + err.Error())
+	}
+	if err = os.Rename(temporary, a.configPath); err != nil {
+		_ = os.Remove(temporary)
+		return failure("replace agent config: " + err.Error())
+	}
+	if err = setAutoUpdateTimer(enabled); err != nil {
+		return model.CommandResult{Status: "failed", Message: "配置已保存，但自动升级定时器更新失败", Details: map[string]any{"auto_update": enabled, "error": err.Error()}}
+	}
+	return model.CommandResult{Status: "success", Message: "agent 自动升级设置已更新", Details: map[string]any{"auto_update": enabled}}
 }
 func (a *app) backup(command model.Command) model.CommandResult {
 	if command.Task == nil {
@@ -193,33 +241,64 @@ func (a *app) backup(command model.Command) model.CommandResult {
 	if err = waitForRemoteSize(dav, remote, size); err != nil {
 		return failure("backup upload did not become readable: " + err.Error())
 	}
-	check, err := dav.Get(remote)
-	if err != nil {
-		return failure("backup upload verification failed: " + err.Error())
-	}
 	verifiedArchive := archive + ".verify"
-	verifyFile, createErr := os.Create(verifiedArchive)
-	if createErr == nil {
-		_, createErr = io.Copy(verifyFile, check)
-		closeErr := verifyFile.Close()
-		if createErr == nil {
-			createErr = closeErr
-		}
-	}
-	_ = check.Close()
 	defer os.Remove(verifiedArchive)
-	if createErr != nil {
-		return failure("backup upload verification failed: " + createErr.Error())
-	}
-	verifiedHash, verifiedSize, verifyErr := agentlib.FileSHA256(verifiedArchive)
-	if verifyErr != nil || !strings.EqualFold(verifiedHash, hash) || verifiedSize != size {
-		return model.CommandResult{Status: "failed", Message: fmt.Sprintf("backup upload verification mismatch: expected sha256=%s size=%d, got sha256=%s size=%d", hash, size, verifiedHash, verifiedSize), Details: map[string]any{"remote_path": remote, "expected_sha256": hash, "actual_sha256": verifiedHash, "expected_size": size, "actual_size": verifiedSize}}
+	verifiedHash, verifiedSize, verifyErr := downloadVerified(dav, remote, verifiedArchive, hash, size, 5*time.Minute)
+	if verifyErr != nil {
+		return model.CommandResult{Status: "failed", Message: "backup upload verification failed: " + verifyErr.Error(), Details: map[string]any{"remote_path": remote, "expected_sha256": hash, "actual_sha256": verifiedHash, "expected_size": size, "actual_size": verifiedSize}}
 	}
 	message := "backup uploaded"
 	if len(manifest.Warnings) > 0 {
 		message = fmt.Sprintf("backup uploaded with %d warning(s)", len(manifest.Warnings))
 	}
 	return model.CommandResult{Status: "success", Message: message, Details: map[string]any{"discovered_paths": manifest.Paths, "discovered_services": agentlib.ServiceNames(manifest.Discovery), "files": manifest.Files, "bytes": manifest.Bytes, "warnings": manifest.Warnings}, Backup: &model.Backup{RepositoryID: command.Task.RepositoryID, RemotePath: remote, Size: size, SHA256: hash, Services: agentlib.ServiceNames(manifest.Discovery), Files: manifest.Files, ArchiveBytes: manifest.Bytes, Warnings: manifest.Warnings}}
+}
+
+func downloadVerified(dav *webdav.Client, remote, destination, expectedHash string, expectedSize int64, timeout time.Duration) (string, int64, error) {
+	deadline := time.Now().Add(timeout)
+	var actualHash string
+	var actualSize int64
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		body, err := dav.Get(remote)
+		if err == nil {
+			file, createErr := os.OpenFile(destination, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+			if createErr == nil {
+				_, createErr = io.Copy(file, body)
+				if closeErr := file.Close(); createErr == nil {
+					createErr = closeErr
+				}
+			}
+			_ = body.Close()
+			if createErr == nil {
+				actualHash, actualSize, err = agentlib.FileSHA256(destination)
+				if err == nil && (expectedSize <= 0 || actualSize == expectedSize) && (expectedHash == "" || strings.EqualFold(actualHash, expectedHash)) {
+					return actualHash, actualSize, nil
+				}
+				if err == nil {
+					lastErr = fmt.Errorf("expected sha256=%s size=%d, got sha256=%s size=%d", expectedHash, expectedSize, actualHash, actualSize)
+				} else {
+					lastErr = err
+				}
+			} else {
+				lastErr = createErr
+			}
+		} else {
+			lastErr = err
+		}
+		_ = os.Remove(destination)
+		if time.Now().After(deadline) {
+			return actualHash, actualSize, lastErr
+		}
+		delay := time.Duration(2+attempt*2) * time.Second
+		if delay > 20*time.Second {
+			delay = 20 * time.Second
+		}
+		if remaining := time.Until(deadline); delay > remaining {
+			delay = remaining
+		}
+		time.Sleep(delay)
+	}
 }
 
 func waitForRemoteSize(dav *webdav.Client, remote string, expected int64) error {
@@ -294,25 +373,16 @@ func (a *app) restore(command model.Command) model.CommandResult {
 	if err != nil {
 		return failure(err.Error())
 	}
-	body, err := dav.Get(backup.RemotePath)
-	if err != nil {
-		return failure(err.Error())
-	}
-	defer body.Close()
 	tmp, err := os.CreateTemp("", "vbakup-restore-*.tar.gz")
 	if err != nil {
 		return failure(err.Error())
 	}
 	archive := tmp.Name()
-	defer os.Remove(archive)
-	if _, err = io.Copy(tmp, body); err != nil {
-		_ = tmp.Close()
-		return failure(err.Error())
-	}
 	_ = tmp.Close()
-	hash, actualSize, err := agentlib.FileSHA256(archive)
-	if err != nil || !strings.EqualFold(hash, backup.SHA256) || (backup.Size > 0 && actualSize != backup.Size) {
-		return model.CommandResult{Status: "failed", Message: fmt.Sprintf("backup checksum mismatch: expected sha256=%s size=%d, got sha256=%s size=%d", backup.SHA256, backup.Size, hash, actualSize), Details: map[string]any{"remote_path": backup.RemotePath, "expected_sha256": backup.SHA256, "actual_sha256": hash, "expected_size": backup.Size, "actual_size": actualSize}}
+	defer os.Remove(archive)
+	hash, actualSize, err := downloadVerified(dav, backup.RemotePath, archive, backup.SHA256, backup.Size, 5*time.Minute)
+	if err != nil {
+		return model.CommandResult{Status: "failed", Message: "backup download verification failed: " + err.Error(), Details: map[string]any{"remote_path": backup.RemotePath, "expected_sha256": backup.SHA256, "actual_sha256": hash, "expected_size": backup.Size, "actual_size": actualSize}}
 	}
 	if err = os.MkdirAll("/var/lib/vbakup", 0700); err != nil {
 		return failure(err.Error())
